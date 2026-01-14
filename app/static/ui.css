@@ -40,9 +40,12 @@
 }
 
 /* 基础重置 */
-* { box-sizing: border-box; outline: none; -webkit-tap-highlight-color: transparent; }
-body {
+*, *::before, *::after { box-sizing: border-box; outline: none; -webkit-tap-highlight-color: transparent; }
+html, body {
     margin: 0;
+    padding: 0;
+    width: 100%;
+    overflow-x: hidden;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: var(--bg-body);
     color: var(--text-primary);
@@ -58,6 +61,7 @@ input, select, textarea { font-family: inherit; }
 .app-layout {
     display: flex;
     min-height: 100vh;
+    width: 100%;
 }
 
 .sidebar {
@@ -71,6 +75,8 @@ input, select, textarea { font-family: inherit; }
     flex-direction: column;
     z-index: 50;
     transition: transform 0.3s ease;
+    top: 0;
+    left: 0;
 }
 
 .main-content {
@@ -79,6 +85,8 @@ input, select, textarea { font-family: inherit; }
     padding: 24px;
     max-width: 1200px;
     width: 100%;
+    /* 防止 flex 子项溢出 */
+    min-width: 0;
 }
 
 .app-header {
@@ -88,21 +96,24 @@ input, select, textarea { font-family: inherit; }
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 24px;
+    padding: 0 16px;
     position: sticky;
     top: 0;
     z-index: 40;
     display: none; /* 仅在移动端或特定页面显示 */
+    width: 100%;
 }
 
 /* 移动端适配 */
 @media (max-width: 768px) {
     .sidebar {
-        transform: translateX(-100%);
-        box-shadow: var(--shadow-md);
-        display: none; /* 移动端使用底部导航 */
+        display: none; /* 强制隐藏，防止占位或溢出 */
     }
-    .main-content { margin-left: 0; padding: 16px; padding-bottom: 80px; }
+    .main-content {
+        margin-left: 0;
+        padding: 16px;
+        padding-bottom: calc(60px + env(safe-area-inset-bottom) + 16px);
+    }
     .app-header { display: flex; }
     
     /* 移动端底部导航 */
@@ -111,13 +122,14 @@ input, select, textarea { font-family: inherit; }
         bottom: 0;
         left: 0;
         right: 0;
-        height: 60px;
+        height: calc(60px + env(safe-area-inset-bottom));
         background: var(--bg-surface);
         border-top: 1px solid var(--border-color);
         display: flex;
         justify-content: space-around;
-        align-items: center;
+        align-items: flex-start;
         z-index: 100;
+        padding-top: 8px;
         padding-bottom: env(safe-area-inset-bottom);
     }
     .mobile-nav-item {
@@ -129,10 +141,16 @@ input, select, textarea { font-family: inherit; }
         font-size: 10px;
         color: var(--text-tertiary);
         gap: 4px;
-        height: 100%;
     }
     .mobile-nav-item.active { color: var(--primary-color); }
     .mobile-nav-item svg { width: 24px; height: 24px; }
+    
+    /* 移动端表格横向滚动容器 */
+    .table-responsive {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
 }
 
 @media (min-width: 769px) {
@@ -174,6 +192,11 @@ input, select, textarea { font-family: inherit; }
     padding: 24px;
     box-shadow: var(--shadow-sm);
     margin-bottom: 24px;
+    width: 100%;
+}
+/* 移动端卡片内边距调整 */
+@media (max-width: 768px) {
+    .card { padding: 16px; }
 }
 
 .btn {
@@ -188,6 +211,12 @@ input, select, textarea { font-family: inherit; }
     gap: 8px;
     transition: all 0.2s;
     border: 1px solid transparent;
+    white-space: nowrap;
+}
+.btn-sm {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
 }
 .btn-primary {
     background: var(--primary-color);
@@ -205,7 +234,7 @@ input, select, textarea { font-family: inherit; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn.loading svg { animation: spin 1s linear infinite; }
 
-.input-group { margin-bottom: 20px; }
+.input-group { margin-bottom: 20px; width: 100%; }
 .input-label {
     display: block;
     font-size: 14px;
@@ -248,6 +277,10 @@ input, select, textarea { font-family: inherit; }
 
 /* Toast 提示 */
 .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+@media (max-width: 768px) {
+    .toast-container { right: 16px; left: 16px; bottom: 80px; }
+    .toast { min-width: 0; width: 100%; }
+}
 .toast {
     background: var(--bg-surface); border: 1px solid var(--border-color);
     padding: 12px 16px; border-radius: var(--radius-md); box-shadow: var(--shadow-md);
@@ -266,7 +299,7 @@ input, select, textarea { font-family: inherit; }
 
 /* 通用工具类 */
 .hidden { display: none !important; }
-.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
 .text-sm { font-size: 13px; }
 .text-muted { color: var(--text-secondary); }
 .mt-4 { margin-top: 16px; }

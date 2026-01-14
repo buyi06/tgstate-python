@@ -46,7 +46,17 @@ def init_db() -> None:
             columns = [info[1] for info in cursor.fetchall()]
             if "short_id" not in columns:
                 logger.info("Migrating database: adding short_id column...")
-                cursor.execute("ALTER TABLE files ADD COLUMN short_id TEXT UNIQUE")
+                try:
+                    # SQLite 不支持在 ADD COLUMN 时直接指定 UNIQUE，需拆分为两步
+                    cursor.execute("ALTER TABLE files ADD COLUMN short_id TEXT")
+                except Exception as e:
+                    logger.error("Migration warning: Failed to add short_id column: %s", e)
+
+            # 确保唯一索引存在（幂等操作）
+            try:
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_files_short_id ON files(short_id)")
+            except Exception as e:
+                logger.error("Migration warning: Failed to create index idx_files_short_id: %s", e)
             
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS app_settings (

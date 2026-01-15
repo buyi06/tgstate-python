@@ -1,4 +1,4 @@
-# TgCloud
+# tgstate-python
 
 **基于 Telegram 的无限私有云存储 & 永久图床系统**
 

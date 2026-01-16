@@ -89,14 +89,27 @@
                 
                 const json = await res.json();
                 if (res.ok) {
-                    Toast.show('设置成功，正在跳转...');
-                    // 自动登录
-                    await fetch('/pwd', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                        body: `password=${encodeURIComponent(pwd)}`
-                    });
-                    setTimeout(() => window.location.href = '/', 1000);
+                    Toast.show('设置成功，正在登录...');
+                    
+                    // 自动登录：使用 /api/auth/login 接口，确保 Cookie 被正确设置 (SHA256 Hash)
+                    try {
+                        const loginRes = await fetch('/api/auth/login', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ password: pwd })
+                        });
+                        
+                        if (loginRes.ok) {
+                             setTimeout(() => window.location.href = '/', 1000);
+                        } else {
+                             // 理论上刚设置完不应该错，除非并发问题
+                             Toast.show('自动登录失败，请手动登录', 'error');
+                             setTimeout(() => window.location.href = '/login', 2000);
+                        }
+                    } catch (e) {
+                         Toast.show('自动登录出错', 'error');
+                         setTimeout(() => window.location.href = '/login', 2000);
+                    }
                 } else {
                     Toast.show(json.detail?.message || '设置失败', 'error');
                 }

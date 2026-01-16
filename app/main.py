@@ -48,15 +48,14 @@ async def security_headers_middleware(request: Request, call_next):
         
     return response
 
+import hashlib
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """
     一个全局中间件，用于处理所有页面的访问权限。
     """
-    # 检查是否设置了密码（Hash 或 Plain）
-    settings = get_app_settings()
-    has_password = bool((settings.get("PASS_HASH") or settings.get("PASS_WORD") or "").strip())
-    
+    active_password = get_active_password()
     request_path = request.url.path
 
     # 定义公共路径，这些路径永远不拦截
@@ -65,7 +64,7 @@ async def auth_middleware(request: Request, call_next):
     is_public = any(request_path.startswith(p) for p in public_paths)
 
     # 情况 1：未设置密码
-    if not has_password:
+    if not active_password:
         # 如果是引导页或 API/静态资源，放行
         if request_path == "/welcome" or request_path == "/settings" or is_public:
             return await call_next(request)
@@ -78,15 +77,14 @@ async def auth_middleware(request: Request, call_next):
         return RedirectResponse(url="/", status_code=307)
 
     # --- 鉴权逻辑 ---
+    # 计算当前密码的 Hash
+    active_token = hashlib.sha256(active_password.encode('utf-8')).hexdigest()
     
-    # 检查 Session
-    session_id = request.cookies.get(COOKIE_NAME)
-    is_authenticated = False
-    
-    if session_id:
-        session = database.get_session(session_id)
-        if session:
-            is_authenticated = True
+    session_password = request.cookies.get(COOKIE_NAME)
+    # 兼容性检查：
+    # 1. Cookie == SHA256(password) (新版逻辑)
+    # 2. Cookie == password (旧版逻辑，避免升级踢下线)
+    is_authenticated = (session_password == active_token) or (session_password == active_password)
 
     # 保护 API
     # 包含了上传、删除、文件列表、配置管理等敏感接口

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Response, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from ..core.config import get_active_password
+import hashlib
 
 router = APIRouter()
 
@@ -19,12 +20,15 @@ async def login(payload: LoginRequest, response: Response):
     
     if input_pwd and input_pwd == stored_pwd:
         # 登录成功，设置 Cookie
+        # 修复：不再存储明文密码，改存 SHA256 哈希，避免特殊字符导致 500 错误
+        token = hashlib.sha256(stored_pwd.encode('utf-8')).hexdigest()
+        
         response = JSONResponse(content={"status": "ok", "message": "登录成功"})
         # 关键修复：设置 secure=False 以支持 http://IP:PORT 访问
         # samesite="Lax" 允许在同一站点导航时发送 Cookie
         response.set_cookie(
             key=COOKIE_NAME,
-            value=stored_pwd, # 保持与中间件一致，存储原密码值（或后续可升级为 Session Token）
+            value=token,
             httponly=True,
             samesite="Lax",
             path="/",

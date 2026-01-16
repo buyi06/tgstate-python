@@ -95,7 +95,15 @@ location / {
 
 ## ❓ 常见问题排查
 
-### Q: 登录后跳转回登录页 / 无法登录？
+### Q: 登录后跳转回登录页 / 无法登录 / 500 错误？
+*   **密码字符支持**：系统已修复 Cookie 存储问题，现在支持包含中文、空格、Emoji 等任意字符的强密码。
+*   **500 Internal Server Error**：如果您在登录时遇到 500 错误，通常是因为旧版本未正确处理特殊字符 Cookie。请尝试清除浏览器 Cookie 或使用无痕模式。
+*   **重置与排查**：
+    *   查看日志：`docker logs tgstate --tail 200`
+    *   **重置数据卷**（注意：这会清空所有数据！）：
+        ```bash
+        docker rm -f tgstate; docker volume rm tgstate-data; docker volume create tgstate-data
+        ```
 *   **检查密码**：设置密码时系统会自动去除首尾空格，请确认输入的密码无误。
 *   **Cookie 问题**：如果您在本地开发环境使用 `localhost`，通常没问题。如果是 IP 访问，请确保浏览器没有禁用 Cookie。尝试点击浏览器地址栏的小锁/图标查看 Cookie 是否写入。
 *   **重置配置**：如果实在无法登录，可以删除 `data/file_metadata.db` 中的 `app_settings` 表记录（需懂 SQL），或直接删除数据库文件（会丢失文件索引，不推荐）。

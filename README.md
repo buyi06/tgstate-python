@@ -6,29 +6,24 @@
 
 ---
 
-## ✅ 一键安装 / 一键更新（保留数据，推荐）
+## 一键脚本（推荐）
+
+### 1) 一键安装 / 一键更新（保留数据，推荐）
+```bash
+bash -lc 'bash <(curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/install.sh)'
+```
+
+### 2) 一键重建容器（保留数据，专治容器跑飞）
+```bash
+bash -lc 'bash <(curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/reset.sh)'
+```
+
+### 3) 一键彻底清理（清空数据，不可逆）
+```bash
+bash -lc 'bash <(curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/purge.sh)'
+```
 
 > 💡 运行脚本时会提示输入端口（回车默认 8000），也可通过环境变量跳过交互：`PORT=15767 BASE_URL=https://...`
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/install.sh | bash
-curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/reset.sh | bash
-curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/purge.sh | bash
-```
-
-> **注意**：`reset.sh` 默认仅重置容器（保留数据）。若需彻底清空数据，请使用 `RESET_WIPE=1` 环境变量运行，或参考下方的“彻底重装”命令。
-
-环境变量一键部署示例：
-
-```bash
-PORT=15767 BASE_URL="https://pan.example.com" curl -fsSL https://raw.githubusercontent.com/buyi06/tgstate-python/main/scripts/install.sh | bash
-```
-
-## 🧨 彻底重装（清空所有数据，不可逆）
-
-```bash
-docker rm -f tgstate >/dev/null 2>&1 || true; docker volume rm tgstate-data >/dev/null 2>&1 || true; docker volume create tgstate-data >/dev/null 2>&1; docker pull ghcr.io/buyi06/tgstate-python:latest && docker run -d --name tgstate --restart unless-stopped -p 8000:8000 -v tgstate-data:/app/data ghcr.io/buyi06/tgstate-python:latest
-```
 
 ---
 

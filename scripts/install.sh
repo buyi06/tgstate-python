@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- 兜底初始化（防止 unbound variable） ---
+: "${BASE_URL:=}"
+: "${PORT:=}"
+: "${NAME:=tgstate}"
+: "${VOL:=tgstate-data}"
+
 IMG="ghcr.io/buyi06/tgstate-python@sha256:e897ce4c2b61e48a13ef0ec025dfd80148ed8669d75f688a1a8d81036fe116e5"
 
-NAME="${NAME:-tgstate}"
-VOL="${VOL:-tgstate-data}"
-
 # --- 端口交互逻辑 ---
-if [[ -z "${PORT:-}" ]]; then
+if [[ -z "${PORT}" ]]; then
   if [[ -t 0 ]]; then
     read -r -p "请输入端口 [默认 8000]: " input_port < /dev/tty
     PORT="${input_port:-8000}"
@@ -23,7 +26,7 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
 fi
 
 # --- BASE_URL 交互逻辑 ---
-if [[ -z "${BASE_URL:-}" ]]; then
+if [[ -z "${BASE_URL}" ]]; then
   if [[ -t 0 ]]; then
     read -r -p "请输入 BASE_URL (留空自动使用公网IP): " input_url < /dev/tty
     BASE_URL="${input_url:-}"

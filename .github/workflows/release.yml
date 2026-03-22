@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Linux amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package binary
+        run: |
+          mkdir -p dist/tgstate
+          cp target/release/tgstate dist/tgstate/
+          cp -r app dist/tgstate/
+          cp .env.example dist/tgstate/
+          cp README.md dist/tgstate/
+          cp Dockerfile dist/tgstate/
+          cd dist && tar czf tgstate-linux-amd64.tar.gz tgstate/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tgstate-linux-amd64
+          path: dist/tgstate-linux-amd64.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tgstate-linux-amd64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tgstate-linux-amd64.tar.gz
+          generate_release_notes: true

@@ -1,6 +1,6 @@
 # tgState
 
-基于 Telegram 的私有文件存储系统（Rust 版）。
+基于 Telegram 的私有文件存储系统，使用 Rust 构建，单文件部署，开箱即用。
 
 将 Telegram 频道作为无限容量的文件存储后端，通过 Web 界面管理上传、下载和分享文件。
 
@@ -8,27 +8,41 @@
 
 - 通过 Web 界面或 API 上传文件到 Telegram 频道
 - 大文件自动分块上传（>19.5MB），下载时流式拼接
-- 短链接分享，支持在线预览常见格式（图片、视频、PDF、文本等）
+- 短链接分享，支持在线预览（图片、视频、PDF、文本等）
 - 图床模式，兼容 PicGo API
-- Telegram Bot 自动同步频道文件变动（新增/删除）
+- Telegram Bot 自动同步频道文件变动
 - SSE 实时推送文件列表更新
-- 密码保护 Web 界面
-- 安全头（HSTS、CSP、X-Frame-Options 等）
-- **一键部署，网页引导式配置，无需预填环境变量**
+- 网页引导式配置，无需预填环境变量
+- 全站安全加固（CSP、CSRF、Rate Limiting、会话超时）
 
 ## 快速开始
 
-### Docker（推荐）
+### 方式一：直接下载（推荐）
+
+从 [Releases](https://github.com/buyi06/tgstate-python/releases) 下载预编译的二进制文件：
 
 ```bash
-docker build -t tgstate .
+# 下载最新版
+wget https://github.com/buyi06/tgstate-python/releases/latest/download/tgstate-linux-amd64.tar.gz
 
-docker run -d -p 8000:8000 -v tgstate_data:/app/data tgstate
+# 解压
+tar xzf tgstate-linux-amd64.tar.gz
+
+# 运行
+cd tgstate
+./tgstate
 ```
 
-启动后访问 `http://127.0.0.1:8000`，按引导页完成配置即可。
+访问 `http://你的IP:8000`，按引导页设置密码，然后在设置页配置 Bot 即可。
 
-### Docker Compose
+### 方式二：Docker
+
+```bash
+docker run -d --name tgstate -p 8000:8000 -v tgstate_data:/app/data \
+  $(docker build -q .)
+```
+
+或使用 Docker Compose：
 
 ```yaml
 services:
@@ -44,7 +58,7 @@ volumes:
   tgstate_data:
 ```
 
-### 本地运行
+### 方式三：从源码编译
 
 ```bash
 # 需要 Rust 1.75+
@@ -52,24 +66,28 @@ cargo build --release
 ./target/release/tgstate
 ```
 
-访问 `http://127.0.0.1:8000`，网页引导页会带你完成：
-1. 设置管理员密码
-2. 配置 Telegram Bot Token 和频道
-3. 可选：设置 Base URL 和 PicGo API Key
+## 配置流程
+
+1. 启动后访问 Web 界面，设置管理员密码
+2. 登录后进入「系统设置」页面
+3. 填写 Bot Token（从 [@BotFather](https://t.me/BotFather) 获取）和频道名
+4. 点击「保存并应用」
+
+所有配置保存在本地数据库中，无需 `.env` 文件。
 
 ## 环境变量（全部可选）
 
-所有配置均可通过网页完成，环境变量仅用于预配置或 Docker 部署场景。
+环境变量仅用于预配置场景（如 Docker 部署时跳过网页配置）。
 
-| 变量 | 说明 |
-|---|---|
-| `BOT_TOKEN` | Telegram Bot Token |
-| `CHANNEL_NAME` | 目标频道（`@username` 或 `-100xxxxxxxxxx`） |
-| `PASS_WORD` | Web 界面访问密码 |
-| `PICGO_API_KEY` | PicGo 上传接口 API 密钥 |
-| `BASE_URL` | 公开访问 URL（默认 `http://127.0.0.1:8000`） |
-| `DATA_DIR` | 数据目录路径（默认 `app/data`） |
-| `LOG_LEVEL` | 日志级别（默认 `info`） |
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `BOT_TOKEN` | Telegram Bot Token | - |
+| `CHANNEL_NAME` | 目标频道 `@name` 或 `-100xxx` | - |
+| `PASS_WORD` | Web 界面访问密码 | - |
+| `PICGO_API_KEY` | PicGo 上传 API 密钥 | - |
+| `BASE_URL` | 公开访问 URL | `http://127.0.0.1:8000` |
+| `DATA_DIR` | 数据目录 | `app/data` |
+| `LOG_LEVEL` | 日志级别 | `info` |
 
 ## API
 
@@ -77,34 +95,31 @@ cargo build --release
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/api/upload` | 上传文件（multipart/form-data，字段名 `file`） |
+| `POST` | `/api/upload` | 上传文件（multipart，字段名 `file`） |
 | `GET` | `/api/files` | 获取文件列表 |
-| `DELETE` | `/api/files/:file_id` | 删除单个文件 |
-| `POST` | `/api/batch_delete` | 批量删除（body: `{"file_ids": [...]}`) |
-| `GET` | `/d/:short_id` | 通过短链接下载/预览文件 |
-| `GET` | `/d/:file_id/:filename` | 旧版下载链接 |
-| `GET` | `/api/file-updates` | SSE 实时文件更新推送 |
+| `DELETE` | `/api/files/:file_id` | 删除文件 |
+| `POST` | `/api/batch_delete` | 批量删除 |
+| `GET` | `/d/:short_id` | 短链接下载/预览 |
+| `GET` | `/api/file-updates` | SSE 实时更新 |
 
 ### 认证
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/api/auth/login` | 登录（body: `{"password": "..."}`) |
-| `POST` | `/api/auth/logout` | 退出登录 |
+| `POST` | `/api/auth/login` | 登录 |
+| `POST` | `/api/auth/logout` | 退出 |
 
-### 配置管理
+### 配置
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/app-config` | 获取当前配置 |
-| `POST` | `/api/app-config/save` | 保存配置（不应用） |
-| `POST` | `/api/app-config/apply` | 保存并应用配置 |
-| `POST` | `/api/reset-config` | 重置所有配置 |
-| `POST` | `/api/set-password` | 设置密码 |
+| `GET` | `/api/app-config` | 获取配置 |
+| `POST` | `/api/app-config/apply` | 保存并应用 |
+| `POST` | `/api/reset-config` | 重置配置 |
 | `POST` | `/api/verify/bot` | 验证 Bot Token |
-| `POST` | `/api/verify/channel` | 验证频道可用性 |
+| `POST` | `/api/verify/channel` | 验证频道 |
 
-### PicGo 兼容上传
+### PicGo 兼容
 
 ```bash
 curl -X POST http://your-host:8000/api/upload \
@@ -112,39 +127,15 @@ curl -X POST http://your-host:8000/api/upload \
   -F "file=@image.png"
 ```
 
-## 项目结构
+## 安全
 
-```
-tgstate-rust/
-├── src/
-│   ├── main.rs              # 入口，服务器启动
-│   ├── config.rs            # 配置管理
-│   ├── database.rs          # SQLite 数据库操作
-│   ├── error.rs             # 错误处理
-│   ├── events.rs            # 事件总线（SSE 推送）
-│   ├── auth.rs              # 认证工具
-│   ├── state.rs             # 应用状态与 Bot 生命周期
-│   ├── middleware/
-│   │   ├── auth.rs          # 认证中间件
-│   │   └── security_headers.rs  # 安全头中间件
-│   ├── routes/
-│   │   ├── api_auth.rs      # 登录/登出
-│   │   ├── api_files.rs     # 文件下载/列表/删除
-│   │   ├── api_settings.rs  # 配置管理
-│   │   ├── api_sse.rs       # SSE 端点
-│   │   ├── api_upload.rs    # 文件上传
-│   │   └── pages.rs         # 页面渲染
-│   └── telegram/
-│       ├── bot_polling.rs   # Bot 轮询处理
-│       ├── service.rs       # Telegram API 封装
-│       └── types.rs         # Telegram 类型定义
-├── app/
-│   ├── templates/           # Tera HTML 模板
-│   └── static/              # CSS/JS 静态资源
-├── Cargo.toml
-├── Dockerfile
-└── .env.example
-```
+- CSRF 防护（Origin 头校验）
+- 登录限流（5 次/分钟/IP）
+- Content Security Policy
+- Cookie 加固（HttpOnly、SameSite=Strict、24h 超时）
+- API 白名单认证
+- 输入验证与错误脱敏
+- 安全头（X-Frame-Options、X-XSS-Protection 等）
 
 ## 技术栈
 
@@ -153,9 +144,32 @@ tgstate-rust/
 | Web 框架 | Axum 0.7 |
 | 异步运行时 | Tokio |
 | 模板引擎 | Tera |
-| 数据库 | SQLite (rusqlite, WAL 模式) |
+| 数据库 | SQLite (WAL) |
 | HTTP 客户端 | reqwest |
-| 序列化 | serde / serde_json |
+| CI/CD | GitHub Actions |
+
+## 项目结构
+
+```
+├── src/
+│   ├── main.rs                 # 入口
+│   ├── config.rs               # 配置管理
+│   ├── database.rs             # SQLite 操作
+│   ├── auth.rs                 # 认证 & Cookie
+│   ├── state.rs                # 应用状态
+│   ├── middleware/
+│   │   ├── auth.rs             # 认证 & CSRF 中间件
+│   │   ├── rate_limit.rs       # 限流中间件
+│   │   └── security_headers.rs # 安全头
+│   ├── routes/                 # API 路由
+│   └── telegram/               # Telegram Bot 服务
+├── app/
+│   ├── templates/              # HTML 模板
+│   └── static/                 # CSS/JS
+├── .github/workflows/          # CI/CD
+├── Dockerfile
+└── Cargo.toml
+```
 
 ## License
 

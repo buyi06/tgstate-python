@@ -14,18 +14,7 @@
 - SSE 实时推送文件列表更新
 - 密码保护 Web 界面
 - 安全头（HSTS、CSP、X-Frame-Options 等）
-
-## 环境变量
-
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `BOT_TOKEN` | 是 | Telegram Bot Token，从 [@BotFather](https://t.me/BotFather) 获取 |
-| `CHANNEL_NAME` | 是 | 目标频道（`@username` 或 `-100xxxxxxxxxx`） |
-| `PASS_WORD` | 否 | Web 界面访问密码 |
-| `PICGO_API_KEY` | 否 | PicGo 上传接口 API 密钥 |
-| `BASE_URL` | 否 | 公开访问 URL，用于生成完整下载链接（默认 `http://127.0.0.1:8000`） |
-| `DATA_DIR` | 否 | 数据目录路径（默认 `app/data`） |
-| `LOG_LEVEL` | 否 | 日志级别（默认 `info`） |
+- **一键部署，网页引导式配置，无需预填环境变量**
 
 ## 快速开始
 
@@ -34,14 +23,10 @@
 ```bash
 docker build -t tgstate .
 
-docker run -d \
-  -p 8000:8000 \
-  -e BOT_TOKEN=your_bot_token \
-  -e CHANNEL_NAME=@your_channel \
-  -e PASS_WORD=your_password \
-  -v tgstate_data:/app/data \
-  tgstate
+docker run -d -p 8000:8000 -v tgstate_data:/app/data tgstate
 ```
+
+启动后访问 `http://127.0.0.1:8000`，按引导页完成配置即可。
 
 ### Docker Compose
 
@@ -51,11 +36,6 @@ services:
     build: .
     ports:
       - "8000:8000"
-    environment:
-      BOT_TOKEN: your_bot_token
-      CHANNEL_NAME: "@your_channel"
-      PASS_WORD: your_password
-      BASE_URL: https://your-domain.com
     volumes:
       - tgstate_data:/app/data
     restart: unless-stopped
@@ -64,21 +44,32 @@ volumes:
   tgstate_data:
 ```
 
-### 本地编译
+### 本地运行
 
 ```bash
 # 需要 Rust 1.75+
 cargo build --release
-
-# 创建 .env 文件
-cp .env.example .env
-# 编辑 .env 填入配置
-
-# 运行
 ./target/release/tgstate
 ```
 
-服务启动后访问 `http://127.0.0.1:8000`。
+访问 `http://127.0.0.1:8000`，网页引导页会带你完成：
+1. 设置管理员密码
+2. 配置 Telegram Bot Token 和频道
+3. 可选：设置 Base URL 和 PicGo API Key
+
+## 环境变量（全部可选）
+
+所有配置均可通过网页完成，环境变量仅用于预配置或 Docker 部署场景。
+
+| 变量 | 说明 |
+|---|---|
+| `BOT_TOKEN` | Telegram Bot Token |
+| `CHANNEL_NAME` | 目标频道（`@username` 或 `-100xxxxxxxxxx`） |
+| `PASS_WORD` | Web 界面访问密码 |
+| `PICGO_API_KEY` | PicGo 上传接口 API 密钥 |
+| `BASE_URL` | 公开访问 URL（默认 `http://127.0.0.1:8000`） |
+| `DATA_DIR` | 数据目录路径（默认 `app/data`） |
+| `LOG_LEVEL` | 日志级别（默认 `info`） |
 
 ## API
 

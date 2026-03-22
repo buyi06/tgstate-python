@@ -345,6 +345,14 @@ async fn download_file_short(
     Query(query): Query<DownloadQuery>,
     headers: HeaderMap,
 ) -> Response {
+    // Validate identifier format
+    if identifier.is_empty() || identifier.len() > 128
+        || identifier.chars().any(|c| c.is_control() || c == '\0')
+    {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id")
+            .into_response();
+    }
+
     let tg_service = match get_telegram_service(&state) {
         Ok(s) => s,
         Err(e) => return e.into_response(),

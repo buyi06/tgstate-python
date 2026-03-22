@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::auth::{sha256_hex, COOKIE_NAME};
+use crate::auth::{self, sha256_hex};
 use crate::config;
 use crate::state::AppState;
 
@@ -15,20 +16,26 @@ pub struct LoginRequest {
     password: String,
 }
 
+fn is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v == "https")
+}
+
 async fn login(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
     let active_password = config::get_active_password(&state.settings);
     let input = payload.password.trim().to_string();
 
     match active_password {
-        Some(ref pwd) if pwd.trim() == input => {
+        Some(ref pwd) if auth::secure_compare(pwd.trim(), &input) => {
+            tracing::info!("登录成功");
             let hash = sha256_hex(pwd.trim());
-            let cookie = format!(
-                "{}={}; HttpOnly; SameSite=Lax; Path=/",
-                COOKIE_NAME, hash
-            );
+            let cookie = auth::build_cookie(&hash, is_https(&headers));
             (
                 [(axum::http::header::SET_COOKIE, cookie)],
                 Json(serde_json::json!({
@@ -38,24 +45,23 @@ async fn login(
             )
                 .into_response()
         }
-        _ => (
-            axum::http::StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": "密码错误"
-            })),
-        )
-            .into_response(),
+        _ => {
+            tracing::warn!("登录失败：密码错误");
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "密码错误"
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
 async fn logout() -> impl IntoResponse {
-    let cookie = format!(
-        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-        COOKIE_NAME
-    );
     (
-        [(axum::http::header::SET_COOKIE, cookie)],
+        [(axum::http::header::SET_COOKIE, auth::build_clear_cookie())],
         Json(serde_json::json!({
             "status": "ok",
             "message": "已退出登录"

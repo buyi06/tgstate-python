@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::auth::{sha256_hex, COOKIE_NAME};
+use crate::auth::sha256_hex;
 use crate::config;
 use crate::database;
 use crate::error::http_error;
@@ -167,9 +167,9 @@ async fn save_and_apply(
     let pwd = merged.get("PASS_WORD").and_then(|v| v.as_deref()).unwrap_or("");
     let cookie = if !pwd.is_empty() {
         let hash = sha256_hex(pwd);
-        format!("{}={}; HttpOnly; SameSite=Lax; Path=/", COOKIE_NAME, hash)
+        crate::auth::build_cookie(&hash, false)
     } else {
-        format!("{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0", COOKIE_NAME)
+        crate::auth::build_clear_cookie()
     };
 
     Ok((
@@ -191,10 +191,7 @@ async fn reset_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let _ = state::apply_runtime_settings(state.clone(), true).await;
     tracing::warn!("配置已重置");
 
-    let cookie = format!(
-        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-        COOKIE_NAME
-    );
+    let cookie = crate::auth::build_clear_cookie();
 
     (
         [(axum::http::header::SET_COOKIE, cookie)],

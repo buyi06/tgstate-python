@@ -12,6 +12,28 @@ use crate::error::http_error;
 use crate::state::AppState;
 use crate::telegram::service::TelegramService;
 
+/// Sanitize filename: extract basename, limit length, remove dangerous chars.
+fn sanitize_filename(raw: &str) -> String {
+    // Extract basename (remove path components)
+    let name = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("upload");
+    // Remove null bytes and control chars
+    let clean: String = name
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\0')
+        .collect();
+    // Limit length
+    if clean.len() > 255 {
+        clean[..255].to_string()
+    } else if clean.is_empty() {
+        "upload".to_string()
+    } else {
+        clean
+    }
+}
+
 async fn upload_file(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -86,13 +108,16 @@ async fn upload_file(
         if name == "key" {
             form_key = field.text().await.ok();
         } else if name == "file" {
-            let filename = field.file_name().unwrap_or("upload").to_string();
+            let raw_filename = field.file_name().unwrap_or("upload").to_string();
+            // Sanitize filename: extract basename, limit length, remove dangerous chars
+            let filename = sanitize_filename(&raw_filename);
             match field.bytes().await {
                 Ok(bytes) => file_data = Some((filename, bytes.to_vec())),
                 Err(e) => {
+                    tracing::error!("文件读取失败: {:?}", e);
                     return Err(http_error(
                         axum::http::StatusCode::BAD_REQUEST,
-                        &format!("读取文件失败: {}", e),
+                        "文件读取失败",
                         "read_error",
                     ));
                 }
@@ -126,17 +151,19 @@ async fn upload_file(
 
     // Write to temp file
     let temp_dir = tempfile::tempdir().map_err(|e| {
+        tracing::error!("创建临时目录失败: {:?}", e);
         http_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("创建临时目录失败: {}", e),
+            "文件处理失败",
             "temp_error",
         )
     })?;
     let temp_path = temp_dir.path().join(&filename);
     std::fs::write(&temp_path, &data).map_err(|e| {
+        tracing::error!("写入临时文件失败: {:?}", e);
         http_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("写入临时文件失败: {}", e),
+            "文件处理失败",
             "temp_error",
         )
     })?;

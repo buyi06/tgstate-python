@@ -75,6 +75,19 @@ async fn main() {
         }
     }
 
+    // Rate limiter
+    let rate_limiter = middleware::rate_limit::RateLimiter::new();
+
+    // Background cleanup for rate limiter
+    let rl_clone = rate_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+        loop {
+            interval.tick().await;
+            middleware::rate_limit::cleanup_expired(&rl_clone).await;
+        }
+    });
+
     // Build router
     let app = Router::new()
         .merge(routes::build_router(state.clone()))
@@ -83,6 +96,10 @@ async fn main() {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth::auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limiter,
+            middleware::rate_limit::rate_limit_middleware,
         ))
         .layer(axum::middleware::from_fn(
             middleware::security_headers::security_headers_middleware,

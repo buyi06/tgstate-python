@@ -75,6 +75,9 @@ async fn upload_file(
         .get("PICGO_API_KEY")
         .and_then(|v| v.as_deref());
     let pass_word = app_settings.get("PASS_WORD").and_then(|v| v.as_deref());
+    // Cookie stores SHA256(password), so hash it for comparison
+    let pass_word_hash = pass_word.map(|p| auth::sha256_hex(p));
+    let pass_word_hash_ref = pass_word_hash.as_deref();
 
     // Get submitted key from header
     let header_key = headers
@@ -88,7 +91,7 @@ async fn upload_file(
             has_referer,
             cookie_value.as_deref(),
             picgo_key,
-            pass_word,
+            pass_word_hash_ref,
             header_key.as_deref(),
         ) {
             return Err(http_error(
@@ -129,7 +132,7 @@ async fn upload_file(
     if header_key.is_none() && !has_referer {
         let final_key = form_key.as_deref();
         if let Err((_, msg, code)) =
-            auth::ensure_upload_auth(has_referer, cookie_value.as_deref(), picgo_key, pass_word, final_key)
+            auth::ensure_upload_auth(has_referer, cookie_value.as_deref(), picgo_key, pass_word_hash_ref, final_key)
         {
             return Err(http_error(
                 axum::http::StatusCode::UNAUTHORIZED,

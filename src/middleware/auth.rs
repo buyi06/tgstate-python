@@ -129,6 +129,11 @@ pub async fn auth_middleware(
 
             // All other /api/* endpoints require auth
             if path.starts_with("/api/") {
+                // Allow /api/upload with X-Api-Key (PicGo compatibility, auth checked in handler)
+                if path.starts_with("/api/upload") && request.headers().get("x-api-key").is_some() {
+                    return next.run(request).await;
+                }
+
                 let session = get_cookie_value(request.headers(), COOKIE_NAME);
                 let token = sha256_hex(active_pwd);
                 let is_auth = session

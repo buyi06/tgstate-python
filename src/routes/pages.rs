@@ -10,7 +10,7 @@ use crate::database;
 use crate::state::AppState;
 
 fn page_cfg(state: &AppState) -> serde_json::Value {
-    let app_settings = config::get_app_settings(&state.settings);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let bot_token = app_settings
         .get("BOT_TOKEN")
         .and_then(|v| v.as_deref())
@@ -90,7 +90,7 @@ async fn welcome(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = page_cfg(&state);
-    let files = database::get_all_files(&state.db_path()).unwrap_or_default();
+    let files = database::get_all_files(&state.db_pool).unwrap_or_default();
     let enriched = enrich_files(&files);
 
     let mut ctx = tera::Context::new();
@@ -116,7 +116,7 @@ async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 async fn image_hosting(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = page_cfg(&state);
-    let files = database::get_all_files(&state.db_path()).unwrap_or_default();
+    let files = database::get_all_files(&state.db_pool).unwrap_or_default();
     // Filter to image files only
     let image_exts = [
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tiff",
@@ -141,8 +141,8 @@ async fn share_page(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
 ) -> impl IntoResponse {
-    let meta = database::get_file_by_id(&state.db_path(), &file_id);
-    let app_settings = config::get_app_settings(&state.settings);
+    let meta = database::get_file_by_id(&state.db_pool, &file_id);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let base_url = app_settings
         .get("BASE_URL")
         .and_then(|v| v.as_deref())

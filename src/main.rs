@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 mod auth;
 mod config;
+mod constants;
 mod database;
 mod error;
 mod events;
@@ -38,14 +39,14 @@ async fn main() {
     // Init settings
     let settings = Settings::from_env();
 
-    // Init database
-    database::init_db(&settings.data_dir);
-    tracing::info!("数据库已初始化");
+    // Init database with connection pool
+    let db_pool = database::init_db(&settings.data_dir);
+    tracing::info!("数据库已初始化（连接池已创建）");
 
     // Create shared HTTP client
     let http_client = reqwest::Client::builder()
         .pool_max_idle_per_host(50)
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_TRANSFER_SECS))
         .build()
         .expect("Failed to create HTTP client");
     tracing::info!("共享的 HTTP 客户端已创建");
@@ -55,13 +56,14 @@ async fn main() {
     tera.register_function("url_for", tera_url_for);
 
     // Build app state
-    let app_settings = config::get_app_settings(&settings);
+    let app_settings = config::get_app_settings(&settings, &db_pool);
     let bot_ready = config::is_bot_ready(&app_settings);
 
     let state = Arc::new(AppState::new(
         settings,
         tera,
         http_client,
+        db_pool,
         app_settings,
         bot_ready,
     ));
@@ -81,7 +83,7 @@ async fn main() {
     // Background cleanup for rate limiter
     let rl_clone = rate_limiter.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(constants::RATE_LIMIT_CLEANUP_INTERVAL_SECS));
         loop {
             interval.tick().await;
             middleware::rate_limit::cleanup_expired(&rl_clone).await;
@@ -92,7 +94,7 @@ async fn main() {
     let app = Router::new()
         .merge(routes::build_router(state.clone()))
         .nest_service("/static", ServeDir::new("app/static"))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 512)) // 512MB
+        .layer(DefaultBodyLimit::max(constants::MAX_UPLOAD_BODY_SIZE)) // 512MB
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth::auth_middleware,

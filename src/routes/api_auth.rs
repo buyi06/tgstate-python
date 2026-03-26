@@ -28,13 +28,14 @@ async fn login(
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    let active_password = config::get_active_password(&state.settings);
+    let active_password = config::get_active_password(&state.settings, &state.db_pool);
     let input = payload.password.trim().to_string();
 
     match active_password {
-        Some(ref pwd) if auth::secure_compare(pwd.trim(), &input) => {
+        Some(ref pwd) if auth::verify_password_auto(&input, pwd.trim()) => {
             tracing::info!("登录成功");
-            let hash = sha256_hex(pwd.trim());
+            // Cookie value is sha256 of the plaintext input
+            let hash = sha256_hex(&input);
             let cookie = auth::build_cookie(&hash, is_https(&headers));
             (
                 [(axum::http::header::SET_COOKIE, cookie)],

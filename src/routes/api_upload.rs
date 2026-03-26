@@ -5,26 +5,26 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
+use bytes::BytesMut;
 
 use crate::auth::{self, COOKIE_NAME};
 use crate::config;
+use crate::constants;
+use crate::database;
 use crate::error::http_error;
 use crate::state::AppState;
 use crate::telegram::service::TelegramService;
 
 /// Sanitize filename: extract basename, limit length, remove dangerous chars.
 fn sanitize_filename(raw: &str) -> String {
-    // Extract basename (remove path components)
     let name = std::path::Path::new(raw)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("upload");
-    // Remove null bytes and control chars
     let clean: String = name
         .chars()
         .filter(|c| !c.is_control() && *c != '\0')
         .collect();
-    // Limit length
     if clean.len() > 255 {
         clean[..255].to_string()
     } else if clean.is_empty() {
@@ -39,7 +39,7 @@ async fn upload_file(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    let app_settings = config::get_app_settings(&state.settings);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
 
     let bot_token = app_settings
         .get("BOT_TOKEN")
@@ -75,17 +75,14 @@ async fn upload_file(
         .get("PICGO_API_KEY")
         .and_then(|v| v.as_deref());
     let pass_word = app_settings.get("PASS_WORD").and_then(|v| v.as_deref());
-    // Cookie stores SHA256(password), so hash it for comparison
     let pass_word_hash = pass_word.map(|p| auth::sha256_hex(p));
     let pass_word_hash_ref = pass_word_hash.as_deref();
 
-    // Get submitted key from header
     let header_key = headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // If header key is available, do auth check now (before reading body)
     if header_key.is_some() || has_referer {
         if let Err((_, msg, code)) = auth::ensure_upload_auth(
             has_referer,
@@ -102,9 +99,15 @@ async fn upload_file(
         }
     }
 
-    // Parse multipart body
+    // Parse multipart body - stream file chunks to Telegram
     let mut form_key: Option<String> = None;
-    let mut file_data: Option<(String, Vec<u8>)> = None;
+    let mut upload_result: Option<Result<String, String>> = None;
+
+    let tg_service = TelegramService::new(
+        bot_token.to_string(),
+        channel_name.to_string(),
+        state.http_client.clone(),
+    );
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -112,19 +115,18 @@ async fn upload_file(
             form_key = field.text().await.ok();
         } else if name == "file" {
             let raw_filename = field.file_name().unwrap_or("upload").to_string();
-            // Sanitize filename: extract basename, limit length, remove dangerous chars
             let filename = sanitize_filename(&raw_filename);
-            match field.bytes().await {
-                Ok(bytes) => file_data = Some((filename, bytes.to_vec())),
-                Err(e) => {
-                    tracing::error!("文件读取失败: {:?}", e);
-                    return Err(http_error(
-                        axum::http::StatusCode::BAD_REQUEST,
-                        "文件读取失败",
-                        "read_error",
-                    ));
-                }
-            }
+
+            // Stream the file in chunks to Telegram
+            upload_result = Some(
+                stream_upload_to_telegram(
+                    &tg_service,
+                    field,
+                    &filename,
+                    &state.db_pool,
+                )
+                .await,
+            );
         }
     }
 
@@ -142,29 +144,16 @@ async fn upload_file(
         }
     }
 
-    let (filename, data) = file_data.ok_or_else(|| {
-        http_error(
-            axum::http::StatusCode::BAD_REQUEST,
-            "未提供文件",
-            "no_file",
-        )
-    })?;
-
-    tracing::info!("开始上传文件: {} ({}字节)", filename, data.len());
-
-    // Upload to Telegram directly from memory (no temp file needed)
-    let tg_service = TelegramService::new(
-        bot_token.to_string(),
-        channel_name.to_string(),
-        state.http_client.clone(),
-    );
-
-    let db_path = state.db_path();
-    let short_id = tg_service
-        .upload_file(data, &filename, &db_path)
-        .await
+    let short_id = upload_result
+        .ok_or_else(|| {
+            http_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "未提供文件",
+                "no_file",
+            )
+        })?
         .map_err(|e| {
-            tracing::error!("文件上传失败: {} - {}", filename, e);
+            tracing::error!("文件上传失败: {}", e);
             http_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("文件上传失败: {}", e),
@@ -180,6 +169,109 @@ async fn upload_file(
         "path": download_path,
         "url": download_path,
     })))
+}
+
+/// Stream file upload: reads multipart field in chunks, uploads each chunk to Telegram
+/// as it reaches TELEGRAM_CHUNK_SIZE. Peak memory is ~1 chunk (~20MB) instead of the full file.
+async fn stream_upload_to_telegram(
+    tg_service: &TelegramService,
+    mut field: axum::extract::multipart::Field<'_>,
+    filename: &str,
+    db_pool: &database::DbPool,
+) -> Result<String, String> {
+    let chunk_size = constants::TELEGRAM_CHUNK_SIZE;
+    let mut buffer = BytesMut::with_capacity(chunk_size);
+    let mut total_size: usize = 0;
+    let mut chunk_ids: Vec<String> = Vec::new();
+    let mut first_message_id: Option<i64> = None;
+    let mut chunk_num: u32 = 0;
+
+    // Read field data incrementally
+    while let Ok(Some(bytes)) = field.chunk().await {
+        buffer.extend_from_slice(&bytes);
+        total_size += bytes.len();
+
+        // When buffer reaches chunk size, send it
+        while buffer.len() >= chunk_size {
+            chunk_num += 1;
+            let chunk_data = buffer.split_to(chunk_size).freeze().to_vec();
+            let chunk_name = format!("{}.part{}", filename, chunk_num);
+
+            let message = tg_service
+                .send_document_raw(chunk_data, &chunk_name, first_message_id)
+                .await?;
+
+            if first_message_id.is_none() {
+                first_message_id = Some(message.message_id);
+            }
+
+            let doc = message.document.ok_or("No document in chunk response")?;
+            chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
+        }
+    }
+
+    // Handle remaining data in buffer
+    if buffer.is_empty() && chunk_ids.is_empty() {
+        return Err("文件为空".into());
+    }
+
+    if chunk_ids.is_empty() {
+        // Small file: single upload (no chunks were sent yet)
+        tracing::info!("直接上传文件: {} ({}字节)", filename, total_size);
+        let data = buffer.freeze().to_vec();
+        let message = tg_service
+            .send_document_raw(data, filename, None)
+            .await?;
+
+        let doc = message.document.ok_or("No document in response")?;
+        let composite_id = format!("{}:{}", message.message_id, doc.file_id);
+
+        let short_id = database::add_file_metadata(db_pool, filename, &composite_id, total_size as i64)
+            .map_err(|e| e.to_string())?;
+        return Ok(short_id);
+    }
+
+    // Send remaining buffer as last chunk
+    if !buffer.is_empty() {
+        chunk_num += 1;
+        let chunk_data = buffer.freeze().to_vec();
+        let chunk_name = format!("{}.part{}", filename, chunk_num);
+
+        let message = tg_service
+            .send_document_raw(chunk_data, &chunk_name, first_message_id)
+            .await?;
+
+        let doc = message.document.ok_or("No document in last chunk response")?;
+        chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
+    }
+
+    // Multi-chunk: create and upload manifest
+    tracing::info!(
+        "分块上传完成: {} ({}MB, {} 块)",
+        filename,
+        total_size / (1024 * 1024),
+        chunk_ids.len()
+    );
+
+    let mut manifest = String::from("tgstate-blob\n");
+    manifest.push_str(filename);
+    manifest.push('\n');
+    for cid in &chunk_ids {
+        manifest.push_str(cid);
+        manifest.push('\n');
+    }
+
+    let manifest_name = format!("{}.manifest", filename);
+    let message = tg_service
+        .send_document_raw(manifest.into_bytes(), &manifest_name, first_message_id)
+        .await?;
+
+    let doc = message.document.ok_or("No document in manifest response")?;
+    let manifest_composite = format!("{}:{}", message.message_id, doc.file_id);
+
+    let short_id = database::add_file_metadata(db_pool, filename, &manifest_composite, total_size as i64)
+        .map_err(|e| e.to_string())?;
+    Ok(short_id)
 }
 
 pub fn router() -> Router<Arc<AppState>> {

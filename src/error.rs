@@ -65,3 +65,42 @@ impl IntoResponse for AppError {
 pub fn http_error(status_code: StatusCode, message: &str, code: &str) -> AppError {
     AppError::new(status_code, message, code)
 }
+
+// --- Typed error handling ---
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppErrorKind {
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    #[error("Pool error: {0}")]
+    Pool(#[from] r2d2::Error),
+
+    #[error("Telegram API error: {0}")]
+    Telegram(String),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("Configuration error: {0}")]
+    #[allow(dead_code)]
+    Config(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<AppErrorKind> for AppError {
+    fn from(kind: AppErrorKind) -> Self {
+        let (status_code, code) = match &kind {
+            AppErrorKind::Database(_) | AppErrorKind::Pool(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "database_error")
+            }
+            AppErrorKind::Telegram(_) => (StatusCode::BAD_GATEWAY, "telegram_error"),
+            AppErrorKind::Http(_) => (StatusCode::BAD_GATEWAY, "http_error"),
+            AppErrorKind::Config(_) => (StatusCode::SERVICE_UNAVAILABLE, "config_error"),
+            AppErrorKind::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        };
+        AppError::new(status_code, &kind.to_string(), code)
+    }
+}

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::config::{self, AppSettingsMap, Settings};
-use crate::database;
+use crate::constants;
+use crate::database::DbPool;
 use crate::events::BroadcastEventBus;
 use crate::telegram::bot_polling;
 
@@ -19,6 +20,7 @@ pub struct AppState {
     pub settings: Settings,
     pub tera: tera::Tera,
     pub http_client: reqwest::Client,
+    pub db_pool: DbPool,
     pub event_bus: BroadcastEventBus,
     pub bot_state: TokioMutex<BotState>,
     pub settings_lock: TokioMutex<()>,
@@ -29,6 +31,7 @@ impl AppState {
         settings: Settings,
         tera: tera::Tera,
         http_client: reqwest::Client,
+        db_pool: DbPool,
         app_settings: AppSettingsMap,
         bot_ready: bool,
     ) -> Self {
@@ -36,7 +39,8 @@ impl AppState {
             settings,
             tera,
             http_client,
-            event_bus: BroadcastEventBus::new(200),
+            db_pool,
+            event_bus: BroadcastEventBus::new(constants::EVENT_BUS_CAPACITY),
             bot_state: TokioMutex::new(BotState {
                 bot_ready,
                 bot_running: false,
@@ -46,10 +50,6 @@ impl AppState {
             }),
             settings_lock: TokioMutex::new(()),
         }
-    }
-
-    pub fn db_path(&self) -> String {
-        database::db_path(&self.settings.data_dir)
     }
 }
 
@@ -72,7 +72,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), String> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let event_bus = state.event_bus.clone();
-    let db_path = state.db_path();
+    let db_pool = state.db_pool.clone();
     let base_url = bot
         .app_settings
         .get("BASE_URL")
@@ -85,7 +85,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), String> {
         bot_polling::run_bot_polling(
             token_clone,
             channel_clone,
-            db_path,
+            db_pool,
             event_bus,
             base_url,
             shutdown_rx,
@@ -114,7 +114,7 @@ pub async fn apply_runtime_settings(
     start_bot_flag: bool,
 ) -> Result<(), String> {
     let _lock = state.settings_lock.lock().await;
-    let current = config::get_app_settings(&state.settings);
+    let current = config::get_app_settings(&state.settings, &state.db_pool);
     let bot_ready = config::is_bot_ready(&current);
 
     // Stop existing bot

@@ -26,7 +26,7 @@ pub struct BatchDeleteRequest {
 }
 
 fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoResponse> {
-    let app_settings = config::get_app_settings(&state.settings);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let token = app_settings
         .get("BOT_TOKEN")
         .and_then(|v| v.as_deref())
@@ -358,7 +358,7 @@ async fn download_file_short(
         Err(e) => return e.into_response(),
     };
 
-    let meta = database::get_file_by_id(&state.db_path(), &identifier);
+    let meta = database::get_file_by_id(&state.db_pool, &identifier);
     match meta {
         Ok(Some(f)) => {
             let force_download = query
@@ -392,7 +392,7 @@ async fn download_file_short_head(
         Err(e) => return e.into_response(),
     };
 
-    let meta = database::get_file_by_id(&state.db_path(), &identifier);
+    let meta = database::get_file_by_id(&state.db_pool, &identifier);
     match meta {
         Ok(Some(f)) => {
             let force_download = query
@@ -469,7 +469,7 @@ async fn download_file_legacy_head(
 }
 
 async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let files = database::get_all_files(&state.db_path()).unwrap_or_default();
+    let files = database::get_all_files(&state.db_pool).unwrap_or_default();
     Json(files)
 }
 
@@ -485,10 +485,9 @@ async fn delete_file(
     tracing::info!("正在删除文件: {}", file_id);
 
     let result = tg_service.delete_file_with_chunks(&file_id).await;
-    let db_path = state.db_path();
 
     if result.main_message_deleted {
-        let db_deleted = database::delete_file_metadata(&db_path, &file_id).unwrap_or(false);
+        let db_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
         let db_status = if db_deleted {
             "deleted"
         } else {
@@ -520,7 +519,7 @@ async fn delete_file(
     }
 
     // TG deletion failed, try force-delete from DB
-    let force_deleted = database::delete_file_metadata(&db_path, &file_id).unwrap_or(false);
+    let force_deleted = database::delete_file_metadata(&state.db_pool, &file_id).unwrap_or(false);
     if force_deleted {
         return Json(serde_json::json!({
             "status": "ok",
@@ -551,18 +550,17 @@ async fn batch_delete_files(
         Err(e) => return e.into_response(),
     };
 
-    let db_path = state.db_path();
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
 
     for fid in &payload.file_ids {
         let result = tg_service.delete_file_with_chunks(fid).await;
         if result.main_message_deleted {
-            database::delete_file_metadata(&db_path, fid).ok();
+            database::delete_file_metadata(&state.db_pool, fid).ok();
             deleted.push(fid.clone());
         } else {
             // Try force delete from DB
-            if database::delete_file_metadata(&db_path, fid).unwrap_or(false) {
+            if database::delete_file_metadata(&state.db_pool, fid).unwrap_or(false) {
                 deleted.push(fid.clone());
             } else {
                 failed.push(fid.clone());

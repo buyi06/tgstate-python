@@ -1,8 +1,15 @@
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rand::Rng;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use std::collections::HashMap;
 use std::path::Path;
 use tracing;
+
+use crate::constants;
+use crate::error::AppErrorKind;
+
+pub type DbPool = Pool<SqliteConnectionManager>;
 
 pub fn db_path(data_dir: &str) -> String {
     std::fs::create_dir_all(data_dir).ok();
@@ -12,15 +19,17 @@ pub fn db_path(data_dir: &str) -> String {
         .to_string()
 }
 
-fn connect(path: &str) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-    Ok(conn)
-}
-
-pub fn init_db(data_dir: &str) {
+pub fn init_db(data_dir: &str) -> DbPool {
     let path = db_path(data_dir);
-    let conn = connect(&path).expect("Failed to open database");
+    let manager = SqliteConnectionManager::file(&path);
+    let pool = Pool::builder()
+        .max_size(10)
+        .min_idle(Some(2))
+        .connection_customizer(Box::new(SqliteInitializer))
+        .build(manager)
+        .expect("Failed to create database pool");
+
+    let conn = pool.get().expect("Failed to get connection for init");
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS files (
@@ -34,7 +43,6 @@ pub fn init_db(data_dir: &str) {
     )
     .expect("Failed to create files table");
 
-    // Migration: add short_id column if missing
     let has_short_id: bool = conn
         .prepare("PRAGMA table_info(files)")
         .unwrap()
@@ -51,6 +59,11 @@ pub fn init_db(data_dir: &str) {
 
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_short_id ON files(short_id);",
+    )
+    .ok();
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_files_upload_date ON files(upload_date DESC);",
     )
     .ok();
 
@@ -72,7 +85,33 @@ pub fn init_db(data_dir: &str) {
     )
     .expect("Failed to init app_settings row");
 
+    // Migration: add session_token column if missing
+    let has_session_token: bool = conn
+        .prepare("PRAGMA table_info(app_settings)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .any(|col| col.map_or(false, |c| c == "session_token"));
+
+    if !has_session_token {
+        tracing::info!("Migrating database: adding session_token column...");
+        if let Err(e) = conn.execute("ALTER TABLE app_settings ADD COLUMN session_token TEXT", []) {
+            tracing::error!("Migration warning: Failed to add session_token column: {}", e);
+        }
+    }
+
     tracing::info!("数据库已成功初始化");
+    pool
+}
+
+#[derive(Debug)]
+struct SqliteInitializer;
+
+impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for SqliteInitializer {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        Ok(())
+    }
 }
 
 fn generate_short_id(length: usize) -> String {
@@ -84,15 +123,15 @@ fn generate_short_id(length: usize) -> String {
 }
 
 pub fn add_file_metadata(
-    db_path: &str,
+    pool: &DbPool,
     filename: &str,
     file_id: &str,
     filesize: i64,
-) -> Result<String, String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+) -> Result<String, AppErrorKind> {
+    let conn = pool.get()?;
 
     for _ in 0..5 {
-        let short_id = generate_short_id(6);
+        let short_id = generate_short_id(constants::SHORT_ID_LENGTH);
         match conn.execute(
             "INSERT INTO files (filename, file_id, filesize, short_id) VALUES (?1, ?2, ?3, ?4)",
             params![filename, file_id, filesize, short_id],
@@ -104,7 +143,6 @@ pub fn add_file_metadata(
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // Check if file_id collision
                 let existing: Option<String> = conn
                     .query_row(
                         "SELECT short_id FROM files WHERE file_id = ?1",
@@ -117,22 +155,19 @@ pub fn add_file_metadata(
                     if !existing_sid.is_empty() {
                         return Ok(existing_sid);
                     }
-                    // Old data without short_id
-                    let new_sid = generate_short_id(6);
+                    let new_sid = generate_short_id(constants::SHORT_ID_LENGTH);
                     conn.execute(
                         "UPDATE files SET short_id = ?1 WHERE file_id = ?2",
                         params![new_sid, file_id],
-                    )
-                    .map_err(|e| e.to_string())?;
+                    )?;
                     return Ok(new_sid);
                 }
-                // short_id collision, retry
                 continue;
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         }
     }
-    Err("Failed to generate unique short_id".into())
+    Err(AppErrorKind::Other("Failed to generate unique short_id".into()))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -144,13 +179,12 @@ pub struct FileMetadata {
     pub short_id: Option<String>,
 }
 
-pub fn get_all_files(db_path: &str) -> Result<Vec<FileMetadata>, String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
+    let conn = pool.get()?;
     let mut stmt = conn
         .prepare(
             "SELECT filename, file_id, filesize, upload_date, short_id FROM files ORDER BY upload_date DESC",
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
 
     let files = stmt
         .query_map([], |row| {
@@ -161,16 +195,15 @@ pub fn get_all_files(db_path: &str) -> Result<Vec<FileMetadata>, String> {
                 upload_date: row.get::<_, String>(3).unwrap_or_default(),
                 short_id: row.get(4).ok(),
             })
-        })
-        .map_err(|e| e.to_string())?
+        })?
         .filter_map(|r| r.ok())
         .collect();
 
     Ok(files)
 }
 
-pub fn get_file_by_id(db_path: &str, identifier: &str) -> Result<Option<FileMetadata>, String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMetadata>, AppErrorKind> {
+    let conn = pool.get()?;
     let result = conn.query_row(
         "SELECT filename, filesize, upload_date, file_id, short_id FROM files WHERE short_id = ?1 OR file_id = ?1",
         params![identifier],
@@ -188,20 +221,19 @@ pub fn get_file_by_id(db_path: &str, identifier: &str) -> Result<Option<FileMeta
     match result {
         Ok(meta) => Ok(Some(meta)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e.into()),
     }
 }
 
-pub fn delete_file_metadata(db_path: &str, file_id: &str) -> Result<bool, String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+pub fn delete_file_metadata(pool: &DbPool, file_id: &str) -> Result<bool, AppErrorKind> {
+    let conn = pool.get()?;
     let rows = conn
-        .execute("DELETE FROM files WHERE file_id = ?1", params![file_id])
-        .map_err(|e| e.to_string())?;
+        .execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
     Ok(rows > 0)
 }
 
-pub fn delete_file_by_message_id(db_path: &str, message_id: i64) -> Result<Option<String>, String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+pub fn delete_file_by_message_id(pool: &DbPool, message_id: i64) -> Result<Option<String>, AppErrorKind> {
+    let conn = pool.get()?;
     let pattern = format!("{}:%", message_id);
 
     let file_id: Option<String> = conn
@@ -213,8 +245,7 @@ pub fn delete_file_by_message_id(db_path: &str, message_id: i64) -> Result<Optio
         .ok();
 
     if let Some(ref fid) = file_id {
-        conn.execute("DELETE FROM files WHERE file_id = ?1", params![fid])
-            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM files WHERE file_id = ?1", params![fid])?;
         tracing::info!(
             "已从数据库中删除与消息ID {} 关联的文件: {}",
             message_id,
@@ -226,11 +257,11 @@ pub fn delete_file_by_message_id(db_path: &str, message_id: i64) -> Result<Optio
 }
 
 pub fn get_app_settings_from_db(
-    db_path: &str,
-) -> Result<HashMap<String, Option<String>>, String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+    pool: &DbPool,
+) -> Result<HashMap<String, Option<String>>, AppErrorKind> {
+    let conn = pool.get()?;
     let result = conn.query_row(
-        "SELECT bot_token, channel_name, pass_word, picgo_api_key, base_url FROM app_settings WHERE id = 1",
+        "SELECT bot_token, channel_name, pass_word, picgo_api_key, base_url, session_token FROM app_settings WHERE id = 1",
         [],
         |row| {
             let mut map = HashMap::new();
@@ -239,6 +270,7 @@ pub fn get_app_settings_from_db(
             map.insert("PASS_WORD".to_string(), row.get::<_, Option<String>>(2)?);
             map.insert("PICGO_API_KEY".to_string(), row.get::<_, Option<String>>(3)?);
             map.insert("BASE_URL".to_string(), row.get::<_, Option<String>>(4)?);
+            map.insert("SESSION_TOKEN".to_string(), row.get::<_, Option<String>>(5)?);
             Ok(map)
         },
     );
@@ -246,7 +278,7 @@ pub fn get_app_settings_from_db(
     match result {
         Ok(map) => Ok(map),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(HashMap::new()),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -256,30 +288,31 @@ fn norm(v: Option<&str>) -> Option<String> {
 }
 
 pub fn save_app_settings_to_db(
-    db_path: &str,
+    pool: &DbPool,
     payload: &HashMap<String, Option<String>>,
-) -> Result<(), String> {
-    let conn = connect(db_path).map_err(|e| e.to_string())?;
+) -> Result<(), AppErrorKind> {
+    let conn = pool.get()?;
     conn.execute(
-        "UPDATE app_settings SET bot_token = ?1, channel_name = ?2, pass_word = ?3, picgo_api_key = ?4, base_url = ?5 WHERE id = 1",
+        "UPDATE app_settings SET bot_token = ?1, channel_name = ?2, pass_word = ?3, picgo_api_key = ?4, base_url = ?5, session_token = ?6 WHERE id = 1",
         params![
             norm(payload.get("BOT_TOKEN").and_then(|v| v.as_deref())),
             norm(payload.get("CHANNEL_NAME").and_then(|v| v.as_deref())),
             norm(payload.get("PASS_WORD").and_then(|v| v.as_deref())),
             norm(payload.get("PICGO_API_KEY").and_then(|v| v.as_deref())),
             norm(payload.get("BASE_URL").and_then(|v| v.as_deref())),
+            norm(payload.get("SESSION_TOKEN").and_then(|v| v.as_deref())),
         ],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     Ok(())
 }
 
-pub fn reset_app_settings_in_db(db_path: &str) -> Result<(), String> {
+pub fn reset_app_settings_in_db(pool: &DbPool) -> Result<(), AppErrorKind> {
     let mut payload = HashMap::new();
     payload.insert("BOT_TOKEN".to_string(), None);
     payload.insert("CHANNEL_NAME".to_string(), None);
     payload.insert("PASS_WORD".to_string(), None);
     payload.insert("PICGO_API_KEY".to_string(), None);
     payload.insert("BASE_URL".to_string(), None);
-    save_app_settings_to_db(db_path, &payload)
+    payload.insert("SESSION_TOKEN".to_string(), None);
+    save_app_settings_to_db(pool, &payload)
 }

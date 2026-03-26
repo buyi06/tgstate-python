@@ -8,6 +8,7 @@ use axum::routing::get;
 use axum::Router;
 use tokio_stream::Stream;
 
+use crate::constants;
 use crate::state::AppState;
 
 async fn file_updates(
@@ -16,7 +17,7 @@ async fn file_updates(
     let mut rx = state.event_bus.subscribe();
 
     let stream = async_stream::stream! {
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        let mut interval = tokio::time::interval(Duration::from_secs(constants::SSE_KEEPALIVE_SECS));
         interval.tick().await; // Skip first immediate tick
 
         loop {

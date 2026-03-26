@@ -17,6 +17,8 @@ tera = "1"
 
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "multipart", "json"] }
@@ -31,6 +33,10 @@ dotenvy = "0.15"
 # Crypto
 sha2 = "0.10"
 hex = "0.4"
+argon2 = "0.5"
+
+# Error handling
+thiserror = "2"
 
 # Logging
 tracing = "0.1"

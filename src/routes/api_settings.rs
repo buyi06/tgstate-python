@@ -67,7 +67,6 @@ fn merge_config(
 ) -> std::collections::HashMap<String, Option<String>> {
     let mut result = existing.clone();
 
-    // Allow empty strings to clear fields (match Python behavior)
     if let Some(ref v) = incoming.bot_token {
         let v = v.trim().to_string();
         result.insert("BOT_TOKEN".into(), if v.is_empty() { None } else { Some(v) });
@@ -78,7 +77,20 @@ fn merge_config(
     }
     if let Some(ref v) = incoming.pass_word {
         let v = v.trim().to_string();
-        result.insert("PASS_WORD".into(), if v.is_empty() { None } else { Some(v) });
+        if v.is_empty() {
+            result.insert("PASS_WORD".into(), None);
+            result.insert("SESSION_TOKEN".into(), None);
+        } else {
+            // Hash password and compute session token
+            if let Ok(hashed) = crate::auth::hash_password(&v) {
+                let session_token = sha256_hex(&v);
+                result.insert("PASS_WORD".into(), Some(hashed));
+                result.insert("SESSION_TOKEN".into(), Some(session_token));
+            } else {
+                // Fallback: store plaintext if hashing fails
+                result.insert("PASS_WORD".into(), Some(v));
+            }
+        }
     }
     if let Some(ref v) = incoming.base_url {
         let v = v.trim().to_string();
@@ -92,7 +104,7 @@ fn merge_config(
 }
 
 async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let settings = config::get_app_settings(&state.settings);
+    let settings = config::get_app_settings(&state.settings, &state.db_pool);
     let bot = state.bot_state.lock().await;
 
     Json(serde_json::json!({
@@ -116,15 +128,14 @@ async fn save_config_only(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AppConfigRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    let db_path = state.db_path();
-    let existing = database::get_app_settings_from_db(&db_path).unwrap_or_default();
+    let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
     let merged = merge_config(&existing, &payload);
 
     if let Err((status, msg, code)) = validate_config(&merged) {
         return Err(http_error(status, msg, code));
     }
 
-    database::save_app_settings_to_db(&db_path, &merged).map_err(|e| {
+    database::save_app_settings_to_db(&state.db_pool, &merged).map_err(|e| {
         http_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             &format!("保存失败: {}", e),
@@ -143,15 +154,14 @@ async fn save_and_apply(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AppConfigRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    let db_path = state.db_path();
-    let existing = database::get_app_settings_from_db(&db_path).unwrap_or_default();
+    let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
     let merged = merge_config(&existing, &payload);
 
     if let Err((status, msg, code)) = validate_config(&merged) {
         return Err(http_error(status, msg, code));
     }
 
-    database::save_app_settings_to_db(&db_path, &merged).map_err(|e| {
+    database::save_app_settings_to_db(&state.db_pool, &merged).map_err(|e| {
         http_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             &format!("保存失败: {}", e),
@@ -163,9 +173,13 @@ async fn save_and_apply(
 
     let bot = state.bot_state.lock().await;
 
-    // Handle password cookie
+    // Handle password cookie - use session_token if available
+    let session_token = merged.get("SESSION_TOKEN").and_then(|v| v.as_deref()).unwrap_or("");
     let pwd = merged.get("PASS_WORD").and_then(|v| v.as_deref()).unwrap_or("");
-    let cookie = if !pwd.is_empty() {
+    let cookie = if !pwd.is_empty() && !session_token.is_empty() {
+        crate::auth::build_cookie(session_token, false)
+    } else if !pwd.is_empty() {
+        // Legacy plaintext password path
         let hash = sha256_hex(pwd);
         crate::auth::build_cookie(&hash, false)
     } else {
@@ -186,8 +200,7 @@ async fn save_and_apply(
 }
 
 async fn reset_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let db_path = state.db_path();
-    database::reset_app_settings_in_db(&db_path).ok();
+    database::reset_app_settings_in_db(&state.db_pool).ok();
     let _ = state::apply_runtime_settings(state.clone(), true).await;
     tracing::warn!("配置已重置");
 
@@ -206,13 +219,24 @@ async fn set_password(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<PasswordRequest>,
 ) -> Result<Json<serde_json::Value>, crate::error::AppError> {
-    let db_path = state.db_path();
+    let db_pool = &state.db_pool;
     let password = payload.password.trim().to_string();
 
-    let mut current = database::get_app_settings_from_db(&db_path).unwrap_or_default();
-    current.insert("PASS_WORD".into(), Some(password));
+    // Hash the password with argon2 and compute session token
+    let hashed = crate::auth::hash_password(&password).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("密码哈希失败: {}", e),
+            "hash_error",
+        )
+    })?;
+    let session_token = sha256_hex(&password);
 
-    database::save_app_settings_to_db(&db_path, &current).map_err(|_| {
+    let mut current = database::get_app_settings_from_db(db_pool).unwrap_or_default();
+    current.insert("PASS_WORD".into(), Some(hashed));
+    current.insert("SESSION_TOKEN".into(), Some(session_token));
+
+    database::save_app_settings_to_db(db_pool, &current).map_err(|_| {
         crate::error::AppError::new(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "无法写入密码。",
@@ -233,7 +257,7 @@ async fn verify_bot(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<VerifyRequest>,
 ) -> impl IntoResponse {
-    let app_settings = config::get_app_settings(&state.settings);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let token = payload
         .bot_token
         .or_else(|| app_settings.get("BOT_TOKEN").and_then(|v| v.clone()))
@@ -296,7 +320,7 @@ async fn verify_channel(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<VerifyRequest>,
 ) -> impl IntoResponse {
-    let app_settings = config::get_app_settings(&state.settings);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let token = payload
         .bot_token
         .or_else(|| app_settings.get("BOT_TOKEN").and_then(|v| v.clone()))

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use crate::database;
+use crate::constants;
+use crate::database::{self, DbPool};
 use crate::events::{build_file_event, BroadcastEventBus};
 use crate::telegram::service::TelegramService;
 use crate::telegram::types::*;
@@ -8,7 +9,7 @@ use crate::telegram::types::*;
 pub async fn run_bot_polling(
     bot_token: String,
     channel_name: String,
-    db_path: String,
+    db_pool: DbPool,
     event_bus: BroadcastEventBus,
     base_url: String,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -47,7 +48,7 @@ pub async fn run_bot_polling(
                 tracing::info!("Bot 轮询收到关闭信号");
                 break;
             }
-            result = get_updates(&client, &bot_token, offset, 30) => {
+            result = get_updates(&client, &bot_token, offset, constants::BOT_POLL_TIMEOUT_SECS as i64) => {
                 match result {
                     Ok(updates) => {
                         for update in updates {
@@ -56,7 +57,7 @@ pub async fn run_bot_polling(
                                 &update,
                                 &tg_service,
                                 &channel_name,
-                                &db_path,
+                                &db_pool,
                                 &event_bus,
                                 &base_url,
                             ).await;
@@ -86,7 +87,7 @@ async fn get_updates(
             "timeout": timeout,
             "allowed_updates": ["message", "channel_post", "edited_message", "edited_channel_post"]
         }))
-        .timeout(Duration::from_secs((timeout + 10) as u64))
+        .timeout(Duration::from_secs(timeout as u64 + 10))
         .send()
         .await
         .map_err(|e| format!("Request error: {}", e))?;
@@ -110,7 +111,7 @@ async fn process_update(
     update: &Update,
     tg_service: &TelegramService,
     channel_name: &str,
-    db_path: &str,
+    db_pool: &DbPool,
     event_bus: &BroadcastEventBus,
     base_url: &str,
 ) {
@@ -118,7 +119,7 @@ async fn process_update(
     let message = update.message.as_ref().or(update.channel_post.as_ref());
     if let Some(msg) = message {
         if msg.document.is_some() || msg.photo.is_some() {
-            handle_new_file(msg, channel_name, db_path, event_bus).await;
+            handle_new_file(msg, channel_name, db_pool, event_bus).await;
         }
         // Handle "get" reply
         if let Some(text) = &msg.text {
@@ -135,7 +136,7 @@ async fn process_update(
         .or(update.edited_channel_post.as_ref());
     if let Some(msg) = edited {
         if msg.text.is_none() && msg.document.is_none() && msg.photo.is_none() {
-            handle_deleted_message(msg, db_path, event_bus).await;
+            handle_deleted_message(msg, db_pool, event_bus).await;
         }
     }
 }
@@ -143,7 +144,7 @@ async fn process_update(
 async fn handle_new_file(
     message: &Message,
     channel_name: &str,
-    db_path: &str,
+    db_pool: &DbPool,
     event_bus: &BroadcastEventBus,
 ) {
     // Check source
@@ -188,7 +189,7 @@ async fn handle_new_file(
 
     let composite_id = format!("{}:{}", message.message_id, file_id);
 
-    match database::add_file_metadata(db_path, &file_name, &composite_id, file_size) {
+    match database::add_file_metadata(db_pool, &file_name, &composite_id, file_size) {
         Ok(short_id) => {
             let upload_date = message
                 .date
@@ -310,12 +311,12 @@ async fn handle_get_reply(
 
 async fn handle_deleted_message(
     message: &Message,
-    db_path: &str,
+    db_pool: &DbPool,
     event_bus: &BroadcastEventBus,
 ) {
     let message_id = message.message_id;
 
-    match database::delete_file_by_message_id(db_path, message_id) {
+    match database::delete_file_by_message_id(db_pool, message_id) {
         Ok(Some(file_id)) => {
             let event = build_file_event("delete", &file_id, None, None, None, None);
             event_bus.publish(serde_json::to_string(&event).unwrap_or_default());

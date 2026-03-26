@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::database::{self, DbPool};
+
 pub type AppSettingsMap = HashMap<String, Option<String>>;
 
 #[derive(Debug, Clone)]
@@ -31,10 +33,8 @@ impl Settings {
 }
 
 /// Get active password: DB first, then env
-pub fn get_active_password(settings: &Settings) -> Option<String> {
-    use crate::database;
-    let db_path = database::db_path(&settings.data_dir);
-    if let Ok(db_settings) = database::get_app_settings_from_db(&db_path) {
+pub fn get_active_password(settings: &Settings, pool: &DbPool) -> Option<String> {
+    if let Ok(db_settings) = database::get_app_settings_from_db(pool) {
         if let Some(Some(pw)) = db_settings.get("PASS_WORD") {
             let pw = pw.trim().to_string();
             if !pw.is_empty() {
@@ -46,10 +46,7 @@ pub fn get_active_password(settings: &Settings) -> Option<String> {
 }
 
 /// Merge DB settings over env settings
-pub fn get_app_settings(settings: &Settings) -> AppSettingsMap {
-    use crate::database;
-    let db_path = database::db_path(&settings.data_dir);
-
+pub fn get_app_settings(settings: &Settings, pool: &DbPool) -> AppSettingsMap {
     let mut result = HashMap::new();
     result.insert("BOT_TOKEN".into(), settings.bot_token.clone());
     result.insert("CHANNEL_NAME".into(), settings.channel_name.clone());
@@ -57,7 +54,7 @@ pub fn get_app_settings(settings: &Settings) -> AppSettingsMap {
     result.insert("PICGO_API_KEY".into(), settings.picgo_api_key.clone());
     result.insert("BASE_URL".into(), Some(settings.base_url.clone()));
 
-    if let Ok(db_settings) = database::get_app_settings_from_db(&db_path) {
+    if let Ok(db_settings) = database::get_app_settings_from_db(pool) {
         for (key, val) in db_settings {
             if let Some(v) = &val {
                 let v = v.trim().to_string();

@@ -9,6 +9,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::Mutex;
 
+use crate::constants;
+
 #[derive(Clone)]
 struct RateEntry {
     count: u32,
@@ -41,6 +43,14 @@ async fn check_rate(
 ) -> bool {
     let mut map = store.lock().await;
     let now = Instant::now();
+
+    // Bound: if too many entries, evict expired ones first
+    if map.len() > constants::RATE_LIMIT_MAX_ENTRIES {
+        map.retain(|_, entry| now.duration_since(entry.window_start) < window);
+        if map.len() > constants::RATE_LIMIT_MAX_ENTRIES {
+            return false;
+        }
+    }
 
     let entry = map.entry(ip).or_insert(RateEntry {
         count: 0,
@@ -89,14 +99,11 @@ pub async fn rate_limit_middleware(
     let ip = extract_ip(&request);
 
     let allowed = if path.starts_with("/api/auth/login") {
-        // Login: 5 requests per 60 seconds
-        check_rate(&limiter.login, ip, 5, Duration::from_secs(60)).await
+        check_rate(&limiter.login, ip, constants::RATE_LIMIT_LOGIN_MAX, Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS)).await
     } else if path.starts_with("/api/upload") {
-        // Upload: 10 requests per 60 seconds
-        check_rate(&limiter.upload, ip, 10, Duration::from_secs(60)).await
+        check_rate(&limiter.upload, ip, constants::RATE_LIMIT_UPLOAD_MAX, Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS)).await
     } else if path.starts_with("/api/") {
-        // General API: 120 requests per 60 seconds
-        check_rate(&limiter.api, ip, 120, Duration::from_secs(60)).await
+        check_rate(&limiter.api, ip, constants::RATE_LIMIT_API_MAX, Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS)).await
     } else {
         true
     };
@@ -119,7 +126,7 @@ pub async fn rate_limit_middleware(
 
 /// Periodically clean up expired entries (call from a background task)
 pub async fn cleanup_expired(limiter: &RateLimiter) {
-    let window = Duration::from_secs(120);
+    let window = Duration::from_secs(constants::RATE_LIMIT_CLEANUP_INTERVAL_SECS);
     let now = Instant::now();
 
     for store in [&limiter.login, &limiter.upload, &limiter.api] {

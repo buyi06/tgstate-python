@@ -1,10 +1,9 @@
 use reqwest::multipart;
 use serde::Serialize;
 
-use crate::database;
+use crate::constants;
+use crate::error::AppErrorKind;
 use crate::telegram::types::*;
-
-const CHUNK_SIZE_BYTES: usize = (19.5 * 1024.0 * 1024.0) as usize;
 
 #[derive(Clone)]
 pub struct TelegramService {
@@ -51,6 +50,7 @@ impl TelegramService {
             .client
             .post(&url)
             .json(&serde_json::json!({"file_id": file_id}))
+            .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
             .send()
             .await
             .map_err(|e| format!("getFile request failed: {}", e))?;
@@ -74,14 +74,14 @@ impl TelegramService {
         file_bytes: Vec<u8>,
         filename: &str,
         reply_to: Option<i64>,
-    ) -> Result<Message, String> {
+    ) -> Result<Message, AppErrorKind> {
         let mime_type = mime_guess::from_path(filename)
             .first_or_octet_stream()
             .to_string();
         let part = multipart::Part::bytes(file_bytes)
             .file_name(filename.to_string())
             .mime_str(&mime_type)
-            .map_err(|e| format!("Invalid MIME type: {}", e))?;
+            .map_err(|e| AppErrorKind::Telegram(format!("Invalid MIME type: {}", e)))?;
         let form = multipart::Form::new()
             .text("chat_id", self.channel_name.clone())
             .part("document", part);
@@ -97,101 +97,20 @@ impl TelegramService {
             .post(&self.api_url("sendDocument"))
             .multipart(form)
             .send()
-            .await
-            .map_err(|e| format!("sendDocument failed: {}", e))?;
+            .await?;
 
         let data: TelegramResponse<Message> = resp
             .json()
-            .await
-            .map_err(|e| format!("Parse sendDocument response: {}", e))?;
-
-        if data.ok {
-            data.result.ok_or_else(|| "No result in response".into())
-        } else {
-            Err(format!(
-                "sendDocument error: {}",
-                data.description.unwrap_or_default()
-            ))
-        }
-    }
-
-    pub async fn upload_file(
-        &self,
-        file_bytes: Vec<u8>,
-        file_name: &str,
-        db_path: &str,
-    ) -> Result<String, String> {
-        if self.channel_name.is_empty() {
-            return Err("CHANNEL_NAME not configured".into());
-        }
-
-        let file_size = file_bytes.len();
-
-        if file_size >= CHUNK_SIZE_BYTES {
-            tracing::info!("文件 {} 较大 ({}MB)，将分块上传", file_name, file_size / (1024 * 1024));
-            return self.upload_as_chunks(file_bytes, file_name, db_path).await;
-        }
-
-        tracing::info!("直接上传文件: {}", file_name);
-        let message = self.send_document(file_bytes, file_name, None).await?;
-
-        let doc = message
-            .document
-            .ok_or("No document in response")?;
-        let composite_id = format!("{}:{}", message.message_id, doc.file_id);
-
-        let short_id = database::add_file_metadata(db_path, file_name, &composite_id, file_size as i64)?;
-        Ok(short_id)
-    }
-
-    async fn upload_as_chunks(
-        &self,
-        file_bytes: Vec<u8>,
-        original_filename: &str,
-        db_path: &str,
-    ) -> Result<String, String> {
-        let total_size = file_bytes.len() as i64;
-        let mut chunk_ids: Vec<String> = Vec::new();
-        let mut first_message_id: Option<i64> = None;
-        let mut chunk_num = 0;
-
-        for chunk in file_bytes.chunks(CHUNK_SIZE_BYTES) {
-            chunk_num += 1;
-            let chunk_name = format!("{}.part{}", original_filename, chunk_num);
-
-            let message = self
-                .send_document(chunk.to_vec(), &chunk_name, first_message_id)
-                .await?;
-
-            if first_message_id.is_none() {
-                first_message_id = Some(message.message_id);
-            }
-
-            let doc = message.document.ok_or("No document in chunk response")?;
-            let composite = format!("{}:{}", message.message_id, doc.file_id);
-            chunk_ids.push(composite);
-        }
-
-        // Create manifest
-        let mut manifest = String::from("tgstate-blob\n");
-        manifest.push_str(original_filename);
-        manifest.push('\n');
-        for cid in &chunk_ids {
-            manifest.push_str(cid);
-            manifest.push('\n');
-        }
-
-        let manifest_name = format!("{}.manifest", original_filename);
-        let message = self
-            .send_document(manifest.into_bytes(), &manifest_name, first_message_id)
             .await?;
 
-        let doc = message.document.ok_or("No document in manifest response")?;
-        let manifest_composite = format!("{}:{}", message.message_id, doc.file_id);
-
-        let short_id =
-            database::add_file_metadata(db_path, original_filename, &manifest_composite, total_size)?;
-        Ok(short_id)
+        if data.ok {
+            data.result.ok_or_else(|| AppErrorKind::Telegram("No result in response".into()))
+        } else {
+            Err(AppErrorKind::Telegram(format!(
+                "sendDocument error: {}",
+                data.description.unwrap_or_default()
+            )))
+        }
     }
 
     pub async fn delete_message(&self, message_id: i64) -> (bool, String) {
@@ -203,6 +122,7 @@ impl TelegramService {
                 "chat_id": self.channel_name,
                 "message_id": message_id
             }))
+            .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
             .send()
             .await
         {
@@ -312,6 +232,18 @@ impl TelegramService {
         result
     }
 
+    /// Public version of send_document for streaming upload (returns String errors)
+    pub async fn send_document_raw(
+        &self,
+        file_bytes: Vec<u8>,
+        filename: &str,
+        reply_to: Option<i64>,
+    ) -> Result<Message, String> {
+        self.send_document(file_bytes, filename, reply_to)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn try_get_manifest_original_filename(
         &self,
         manifest_file_id: &str,
@@ -324,7 +256,7 @@ impl TelegramService {
         let resp = self
             .client
             .get(&url)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(constants::HTTP_TIMEOUT_METADATA_SECS))
             .send()
             .await
             .map_err(|e| format!("Download manifest failed: {}", e))?;

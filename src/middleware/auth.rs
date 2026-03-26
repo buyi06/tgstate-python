@@ -26,7 +26,6 @@ fn get_cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<Strin
 /// CSRF check: for state-changing requests, verify Origin/Referer matches host.
 fn check_csrf(request: &Request) -> bool {
     let method = request.method();
-    // Only check POST, PUT, DELETE, PATCH
     if method == axum::http::Method::GET || method == axum::http::Method::HEAD || method == axum::http::Method::OPTIONS {
         return true;
     }
@@ -40,23 +39,19 @@ fn check_csrf(request: &Request) -> bool {
         }
     }
 
-    // Get Host header
     let host = request
         .headers()
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Check Origin header first
     if let Some(origin) = request.headers().get("origin").and_then(|v| v.to_str().ok()) {
-        // Parse origin to extract host part
         if let Some(origin_host) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
             return origin_host == host;
         }
         return false;
     }
 
-    // Fallback: check Referer header
     if let Some(referer) = request.headers().get("referer").and_then(|v| v.to_str().ok()) {
         if let Some(after_scheme) = referer.strip_prefix("http://").or_else(|| referer.strip_prefix("https://")) {
             let referer_host = after_scheme.split('/').next().unwrap_or("");
@@ -65,8 +60,27 @@ fn check_csrf(request: &Request) -> bool {
         return false;
     }
 
-    // No Origin or Referer: allow (for non-browser clients like curl)
     true
+}
+
+/// Check if session cookie is valid against the active password.
+/// Supports both hashed (argon2) and plaintext passwords.
+fn check_session(session: Option<&str>, active_pwd: &str, app_settings: &config::AppSettingsMap) -> bool {
+    let session = match session {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // If session_token is stored (argon2 password), check against it
+    if let Some(Some(token)) = app_settings.get("SESSION_TOKEN") {
+        if !token.is_empty() {
+            return auth::secure_compare(session, token);
+        }
+    }
+
+    // Legacy: password is plaintext, cookie is sha256(password)
+    let token = sha256_hex(active_pwd);
+    auth::secure_compare(session, &token) || auth::secure_compare(session, active_pwd)
 }
 
 pub async fn auth_middleware(
@@ -97,11 +111,20 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    let active_password = config::get_active_password(&state.settings);
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let active_password = app_settings
+        .get("PASS_WORD")
+        .and_then(|v| v.as_ref())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    // Also check env password as fallback
+    let active_password = active_password.or_else(|| {
+        config::get_active_password(&state.settings, &state.db_pool)
+    });
 
     match active_password {
         None => {
-            // No password set: only allow /welcome, /settings, and public API paths
             let public_no_auth = [
                 "/welcome",
                 "/settings",
@@ -116,29 +139,22 @@ pub async fn auth_middleware(
             return Redirect::temporary("/welcome").into_response();
         }
         Some(ref active_pwd) => {
-            // Password is set
             if path == "/welcome" {
                 return Redirect::temporary("/").into_response();
             }
 
-            // Public API endpoints (no auth needed)
             let public_api = ["/api/auth/login", "/api/auth/logout", "/api/verify/"];
             if public_api.iter().any(|p| path.starts_with(p)) {
                 return next.run(request).await;
             }
 
-            // All other /api/* endpoints require auth
             if path.starts_with("/api/") {
-                // Allow /api/upload with X-Api-Key (PicGo compatibility, auth checked in handler)
                 if path.starts_with("/api/upload") && request.headers().get("x-api-key").is_some() {
                     return next.run(request).await;
                 }
 
                 let session = get_cookie_value(request.headers(), COOKIE_NAME);
-                let token = sha256_hex(active_pwd);
-                let is_auth = session
-                    .as_ref()
-                    .map_or(false, |s| auth::secure_compare(s, &token) || auth::secure_compare(s, active_pwd));
+                let is_auth = check_session(session.as_deref(), active_pwd, &app_settings);
 
                 if !is_auth {
                     tracing::warn!("API 未授权访问: {}", path);
@@ -153,15 +169,11 @@ pub async fn auth_middleware(
                 return next.run(request).await;
             }
 
-            // Protected pages
             let protected_pages = ["/", "/image_hosting", "/files", "/settings"];
             let is_protected_page = protected_pages.iter().any(|p| path == *p);
 
             let session = get_cookie_value(request.headers(), COOKIE_NAME);
-            let token = sha256_hex(active_pwd);
-            let is_auth = session
-                .as_ref()
-                .map_or(false, |s| auth::secure_compare(s, &token) || auth::secure_compare(s, active_pwd));
+            let is_auth = check_session(session.as_deref(), active_pwd, &app_settings);
 
             if is_protected_page {
                 if !is_auth {
@@ -170,7 +182,6 @@ pub async fn auth_middleware(
                 return next.run(request).await;
             }
 
-            // Login pages: redirect to / if already authenticated
             if path == "/login" || path == "/pwd" {
                 if is_auth {
                     return Redirect::temporary("/").into_response();
@@ -178,12 +189,10 @@ pub async fn auth_middleware(
                 return next.run(request).await;
             }
 
-            // Share pages: public
             if path.starts_with("/share/") {
                 return next.run(request).await;
             }
 
-            // Everything else: pass through
             next.run(request).await
         }
     }

@@ -14,91 +14,41 @@
             document.documentElement.setAttribute('data-theme', mode);
         })();
     </script>
-    <style>
-        .login-container {
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 24px;
-            background: var(--bg-body);
-        }
-        .login-brand {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 22px;
-            font-weight: 700;
-            color: var(--text-primary);
-            margin-bottom: 40px;
-        }
-        .login-brand-icon {
-            width: 40px;
-            height: 40px;
-            background: linear-gradient(135deg, #2563eb, #7c3aed);
-            border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-        }
-        .login-card {
-            width: 100%;
-            max-width: 400px;
-            padding: 40px 32px;
-        }
-        .login-icon {
-            width: 56px;
-            height: 56px;
-            background: linear-gradient(135deg, rgba(37,99,235,0.1), rgba(124,58,237,0.1));
-            border-radius: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 20px;
-            color: var(--primary-color);
-        }
-        .login-title {
-            font-size: 22px;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 8px;
-        }
-        .login-desc {
-            color: var(--text-secondary);
-            font-size: 14px;
-            text-align: center;
-            margin-bottom: 32px;
-        }
-    </style>
 </head>
 <body>
-    <div class="login-container">
-        <div class="login-brand">
-            <div class="login-brand-icon">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-            </div>
-            tgState
+    <div class="standalone-page">
+        <div class="bg-orbs">
+            <div class="bg-orb bg-orb-1"></div>
+            <div class="bg-orb bg-orb-2"></div>
+            <div class="bg-orb bg-orb-3"></div>
         </div>
 
-        <div class="card login-card">
-            <div class="login-icon">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-            </div>
-            <h1 class="login-title">欢迎回来</h1>
-            <p class="login-desc">请输入管理员密码以继续访问。</p>
-
-            <form id="login-form" onsubmit="return false;">
-                <div class="input-group">
-                    <label class="input-label">密码</label>
-                    <input type="password" class="input-field" id="password" name="password" placeholder="请输入密码" required autofocus>
+        <div style="text-align:center;width:100%;max-width:420px;position:relative;z-index:1;">
+            <div style="display:flex;align-items:center;justify-content:center;gap:10px;font-size:22px;font-weight:800;color:var(--text-primary);margin-bottom:40px;">
+                <div class="logo-icon" style="width:40px;height:40px;border-radius:12px;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
                 </div>
-                <button type="submit" class="btn btn-primary" style="width: 100%; height: 48px; font-size: 15px;" onclick="submitLogin()">登录</button>
-            </form>
-        </div>
+                tgState
+            </div>
 
-        <p style="margin-top: 32px; color: var(--text-tertiary); font-size: 13px;">Powered by Telegram</p>
+            <div class="standalone-card">
+                <div class="standalone-icon" style="width:56px;height:56px;border-radius:16px;margin:0 auto 20px;">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                </div>
+                <h1 style="font-size:22px;font-weight:700;text-align:center;margin-bottom:8px;">欢迎回来</h1>
+                <p style="color:var(--text-secondary);font-size:14px;text-align:center;margin-bottom:32px;">请输入管理员密码以继续访问。</p>
+
+                <form id="login-form" onsubmit="return false;" style="text-align:left;">
+                    <div class="input-group">
+                        <label class="input-label">密码</label>
+                        <input type="password" class="input-field" id="password" name="password" placeholder="请输入密码" required autofocus>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%; height: 48px; font-size: 15px;" onclick="submitLogin()">登录</button>
+                </form>
+            </div>
+
+            <p class="powered-by" style="margin-top:32px;">Powered by Telegram</p>
+        </div>
     </div>
 
     <script>

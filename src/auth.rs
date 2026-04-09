@@ -9,12 +9,35 @@ pub fn sha256_hex(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::ensure_upload_auth;
+
+    #[test]
+    fn password_only_api_request_without_session_is_rejected() {
+        let result = ensure_upload_auth(false, None, None, Some("hashed"), None);
+        match result {
+            Err((401, _, "login_required")) => {}
+            other => panic!("expected login_required rejection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn password_only_request_with_matching_session_is_allowed() {
+        let result = ensure_upload_auth(false, Some("hashed"), None, Some("hashed"), None);
+        assert_eq!(result, Ok(()));
+    }
+}
+
 /// Build a session cookie string with security flags.
 pub fn build_cookie(value: &str, is_https: bool) -> String {
     let secure = if is_https { "; Secure" } else { "" };
     format!(
         "{}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
-        COOKIE_NAME, value, constants::SESSION_MAX_AGE_SECS, secure
+        COOKIE_NAME,
+        value,
+        constants::SESSION_MAX_AGE_SECS,
+        secure
     )
 }
 
@@ -108,9 +131,6 @@ pub fn ensure_upload_auth(
 
     // Only PASS_WORD set
     if !has_picgo && has_pwd {
-        if !has_referer {
-            return Ok(());
-        }
         if let Some(cookie) = cookie_value {
             if secure_compare(cookie, pass_word.unwrap()) {
                 return Ok(());

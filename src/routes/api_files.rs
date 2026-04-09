@@ -46,7 +46,11 @@ fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoRe
         ));
     }
 
-    Ok(TelegramService::new(token, channel, state.http_client.clone()))
+    Ok(TelegramService::new(
+        token,
+        channel,
+        state.http_client.clone(),
+    ))
 }
 
 fn guess_content_type(filename: &str) -> String {
@@ -64,15 +68,11 @@ fn guess_content_type(filename: &str) -> String {
 fn content_disposition(filename: &str, force_download: bool) -> String {
     let preview_extensions = [
         "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "tiff", "mp4", "webm", "ogg",
-        "mp3", "wav", "flac", "pdf", "txt", "html", "htm", "css", "js", "json", "xml", "csv",
-        "md", "log",
+        "mp3", "wav", "flac", "pdf", "txt", "html", "htm", "css", "js", "json", "xml", "csv", "md",
+        "log",
     ];
 
-    let ext = filename
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
 
     let is_inline = !force_download && preview_extensions.contains(&ext.as_str());
 
@@ -85,6 +85,15 @@ fn content_disposition(filename: &str, force_download: bool) -> String {
     } else {
         format!("attachment; filename*=UTF-8''{}", encoded_name)
     }
+}
+
+fn chunk_download_failed_response(chunk_id: &str) -> Response {
+    http_error(
+        StatusCode::BAD_GATEWAY,
+        &format!("Chunk download failed: {}", chunk_id),
+        "chunk_download_failed",
+    )
+    .into_response()
 }
 
 async fn serve_file(
@@ -203,39 +212,54 @@ async fn serve_file(
                 .unwrap();
         }
 
+        let mut chunk_urls = Vec::with_capacity(chunk_ids.len());
+        for chunk_composite in &chunk_ids {
+            let real_id = if let Some(pos) = chunk_composite.find(':') {
+                chunk_composite[pos + 1..].to_string()
+            } else {
+                chunk_composite.clone()
+            };
+
+            let url = match tg_service.get_download_url(&real_id).await {
+                Ok(Some(u)) => u,
+                _ => return chunk_download_failed_response(chunk_composite),
+            };
+            chunk_urls.push((chunk_composite.clone(), url));
+        }
+
         // Stream chunks with retry
         let tg = tg_service.clone();
         let http = client.clone();
         let stream = async_stream::stream! {
-            for chunk_composite in chunk_ids {
-                let real_id = if let Some(pos) = chunk_composite.find(':') {
-                    chunk_composite[pos + 1..].to_string()
-                } else {
-                    chunk_composite.clone()
-                };
-
-                let url = match tg.get_download_url(&real_id).await {
-                    Ok(Some(u)) => u,
-                    _ => {
-                        tracing::error!("Failed to get chunk URL: {}", chunk_composite);
-                        continue;
-                    }
-                };
-
+            for (chunk_composite, url) in chunk_urls {
                 let resp = match http.get(&url).send().await {
                     Ok(r) if r.status().is_success() => r,
                     _ => {
                         // Retry once after 1 second
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let real_id = if let Some(pos) = chunk_composite.find(':') {
+                            chunk_composite[pos + 1..].to_string()
+                        } else {
+                            chunk_composite.clone()
+                        };
                         let retry_url = match tg.get_download_url(&real_id).await {
                             Ok(Some(u)) => u,
-                            _ => continue,
+                            _ => {
+                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
+                                    "Failed to refresh chunk URL: {}",
+                                    chunk_composite
+                                )));
+                                return;
+                            }
                         };
                         match http.get(&retry_url).send().await {
                             Ok(r) if r.status().is_success() => r,
                             _ => {
-                                tracing::error!("Chunk download retry failed: {}", chunk_composite);
-                                continue;
+                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
+                                    "Chunk download retry failed: {}",
+                                    chunk_composite
+                                )));
+                                return;
                             }
                         }
                     }
@@ -246,8 +270,11 @@ async fn serve_file(
                     match chunk {
                         Ok(bytes) => yield Ok::<_, std::io::Error>(bytes),
                         Err(e) => {
-                            tracing::error!("Chunk stream error: {}", e);
-                            break;
+                            yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
+                                "Chunk stream error for {}: {}",
+                                chunk_composite, e
+                            )));
+                            return;
                         }
                     }
                 }
@@ -301,9 +328,9 @@ async fn serve_file(
 
         let stream = range_resp.bytes_stream();
         return builder
-            .body(Body::from_stream(
-                stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
-            ))
+            .body(Body::from_stream(stream.map(|r| {
+                r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            })))
             .unwrap();
     }
 
@@ -333,9 +360,9 @@ async fn serve_file(
 
     let stream = full_resp.bytes_stream();
     builder
-        .body(Body::from_stream(
-            stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
-        ))
+        .body(Body::from_stream(stream.map(|r| {
+            r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        })))
         .unwrap()
 }
 
@@ -346,11 +373,11 @@ async fn download_file_short(
     headers: HeaderMap,
 ) -> Response {
     // Validate identifier format
-    if identifier.is_empty() || identifier.len() > 128
+    if identifier.is_empty()
+        || identifier.len() > 128
         || identifier.chars().any(|c| c.is_control() || c == '\0')
     {
-        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id")
-            .into_response();
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
     }
 
     let tg_service = match get_telegram_service(&state) {
@@ -589,4 +616,16 @@ pub fn router() -> Router<Arc<AppState>> {
             "/d/:identifier",
             get(download_file_short).head(download_file_short_head),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_download_failed_response;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn manifest_chunk_failure_returns_bad_gateway() {
+        let response = chunk_download_failed_response("chunk-1");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
 }

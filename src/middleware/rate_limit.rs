@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -44,7 +44,6 @@ async fn check_rate(
     let mut map = store.lock().await;
     let now = Instant::now();
 
-    // Bound: if too many entries, evict expired ones first
     if map.len() > constants::RATE_LIMIT_MAX_ENTRIES {
         map.retain(|_, entry| now.duration_since(entry.window_start) < window);
         if map.len() > constants::RATE_LIMIT_MAX_ENTRIES {
@@ -67,26 +66,50 @@ async fn check_rate(
     }
 }
 
+fn parse_truthy(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Read and cache the `TRUST_FORWARDED_FOR` env flag. Defaults to `false` —
+/// meaning X-Forwarded-For / X-Real-IP are IGNORED and we always use the
+/// actual TCP peer address for rate-limiting. Set to `1`/`true` only when
+/// running behind a reverse proxy you control (Nginx/Caddy/Traefik).
+fn trust_forwarded_for() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("TRUST_FORWARDED_FOR")
+            .map(|v| parse_truthy(&v))
+            .unwrap_or(false)
+    })
+}
+
 fn extract_ip(request: &Request) -> IpAddr {
-    // Try X-Forwarded-For first (reverse proxy)
-    if let Some(xff) = request.headers().get("x-forwarded-for") {
-        if let Ok(s) = xff.to_str() {
-            if let Some(first) = s.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+    if trust_forwarded_for() {
+        if let Some(xff) = request.headers().get("x-forwarded-for") {
+            if let Ok(s) = xff.to_str() {
+                if let Some(first) = s.split(',').next() {
+                    if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                        return ip;
+                    }
+                }
+            }
+        }
+        if let Some(xri) = request.headers().get("x-real-ip") {
+            if let Ok(s) = xri.to_str() {
+                if let Ok(ip) = s.trim().parse::<IpAddr>() {
                     return ip;
                 }
             }
         }
     }
-    // Try X-Real-IP
-    if let Some(xri) = request.headers().get("x-real-ip") {
-        if let Ok(s) = xri.to_str() {
-            if let Ok(ip) = s.trim().parse::<IpAddr>() {
-                return ip;
-            }
-        }
+    // Default: use the real TCP peer address injected by
+    // `into_make_service_with_connect_info::<SocketAddr>()` in main.rs.
+    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return addr.ip();
     }
-    // Fallback to loopback
     "127.0.0.1".parse().unwrap()
 }
 

@@ -1,199 +1,162 @@
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::Response;
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::StatusCode;
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Redirect, Response};
-
-use crate::auth::{self, sha256_hex, COOKIE_NAME};
+use crate::auth::{self, COOKIE_NAME};
 use crate::config;
-use crate::error::error_payload;
 use crate::state::AppState;
 
-fn get_cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+fn extract_cookie<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
     headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
+        .get(axum::http::header::COOKIE)
+        .and_then(|hv| hv.to_str().ok())
         .and_then(|cookies| {
-            cookies.split(';').find_map(|c| {
-                let c = c.trim();
-                c.strip_prefix(&format!("{}=", name))
-                    .map(|v| v.to_string())
-            })
+            for part in cookies.split(';') {
+                let kv = part.trim();
+                if let Some((k, v)) = kv.split_once('=') {
+                    if k == name {
+                        return Some(v);
+                    }
+                }
+            }
+            None
         })
 }
 
-/// CSRF check: for state-changing requests, verify Origin/Referer matches host.
-fn check_csrf(request: &Request) -> bool {
-    let method = request.method();
-    if method == axum::http::Method::GET || method == axum::http::Method::HEAD || method == axum::http::Method::OPTIONS {
-        return true;
+fn redirect_or_401(path: &str, accept_html: bool) -> Response {
+    if accept_html && !path.starts_with("/api/") {
+        // Redirect browsers to /login
+        let mut resp = Response::new(Body::empty());
+        *resp.status_mut() = StatusCode::SEE_OTHER;
+        resp.headers_mut()
+            .insert(axum::http::header::LOCATION, "/login".parse().unwrap());
+        resp
+    } else {
+        let mut resp = Response::new(Body::from(
+            serde_json::json!({
+                "status": "error",
+                "code": "unauthorized",
+                "message": "需要登录"
+            })
+            .to_string(),
+        ));
+        *resp.status_mut() = StatusCode::UNAUTHORIZED;
+        resp.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8".parse().unwrap(),
+        );
+        resp
     }
-
-    let path = request.uri().path();
-
-    // Skip CSRF for API-key based uploads (PicGo compatibility)
-    if path.starts_with("/api/upload") {
-        if request.headers().get("x-api-key").is_some() {
-            return true;
-        }
-    }
-
-    let host = request
-        .headers()
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if let Some(origin) = request.headers().get("origin").and_then(|v| v.to_str().ok()) {
-        if let Some(origin_host) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
-            return origin_host == host;
-        }
-        return false;
-    }
-
-    if let Some(referer) = request.headers().get("referer").and_then(|v| v.to_str().ok()) {
-        if let Some(after_scheme) = referer.strip_prefix("http://").or_else(|| referer.strip_prefix("https://")) {
-            let referer_host = after_scheme.split('/').next().unwrap_or("");
-            return referer_host == host;
-        }
-        return false;
-    }
-
-    true
 }
 
-/// Check if session cookie is valid against the active password.
-/// Supports both hashed (argon2) and plaintext passwords.
-fn check_session(session: Option<&str>, active_pwd: &str, app_settings: &config::AppSettingsMap) -> bool {
-    let session = match session {
-        Some(s) => s,
-        None => return false,
+fn wants_html(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false)
+}
+
+fn load_settings_snapshot(
+    state: &Arc<AppState>,
+) -> (Option<String>, Option<String>) {
+    let settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let active_pwd = config::get_active_password(&state.settings, &state.db_pool);
+    let session_token = settings
+        .get("SESSION_TOKEN")
+        .and_then(|v| v.clone());
+    (active_pwd, session_token)
+}
+
+fn check_session(
+    session_cookie: Option<&str>,
+    active_pwd: Option<&str>,
+    session_token: Option<&str>,
+) -> bool {
+    // A password must be configured, a server-side session token must exist,
+    // and the cookie must match the token in constant time.
+    //
+    // We no longer fall back to comparing the cookie against `sha256(pwd)` or
+    // against the raw password: the cookie is an opaque random token stored in
+    // `app_settings.session_token` and may not be re-derivable from the password.
+    let (_pwd, token, cookie) = match (active_pwd, session_token, session_cookie) {
+        (Some(p), Some(t), Some(c)) if !p.is_empty() && !t.is_empty() => (p, t, c),
+        _ => return false,
     };
-
-    // If session_token is stored (argon2 password), check against it
-    if let Some(Some(token)) = app_settings.get("SESSION_TOKEN") {
-        if !token.is_empty() {
-            return auth::secure_compare(session, token);
-        }
-    }
-
-    // Legacy: password is plaintext, cookie is sha256(password)
-    let token = sha256_hex(active_pwd);
-    auth::secure_compare(session, &token) || auth::secure_compare(session, active_pwd)
+    auth::secure_compare(cookie, token)
 }
 
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
-    request: Request,
+    req: Request<Body>,
     next: Next,
 ) -> Response {
-    let path = request.uri().path().to_string();
+    let path = req.uri().path().to_string();
 
-    // CSRF check for all state-changing requests
-    if !check_csrf(&request) {
-        tracing::warn!("CSRF 检查失败: {}", path);
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({
-                "status": "error",
-                "code": "csrf_failed",
-                "message": "跨域请求被拒绝"
-            })),
-        )
-            .into_response();
+    // Always-allowed static paths
+    let public_static_prefixes = [
+        "/static/",
+        "/assets/",
+        "/favicon",
+        "/robots.txt",
+    ];
+    if public_static_prefixes.iter().any(|p| path.starts_with(p)) {
+        return next.run(req).await;
     }
 
-    // Static files and download paths: always public
-    let static_public = ["/static", "/d", "/favicon.ico"];
-    let is_static_public = static_public.iter().any(|p| path.starts_with(p));
-    if is_static_public {
-        return next.run(request).await;
+    // Always-allowed API paths (regardless of password state)
+    let always_public = ["/api/health"];
+    if always_public.iter().any(|p| &path == p || path.starts_with(&format!("{}/", p))) {
+        return next.run(req).await;
     }
 
-    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
-    let active_password = app_settings
-        .get("PASS_WORD")
-        .and_then(|v| v.as_ref())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
+    let (active_pwd, session_token) = load_settings_snapshot(&state);
 
-    // Also check env password as fallback
-    let active_password = active_password.or_else(|| {
-        config::get_active_password(&state.settings, &state.db_pool)
-    });
-
-    match active_password {
-        None => {
-            let public_no_auth = [
-                "/welcome",
-                "/settings",
-                "/api/set-password",
-                "/api/auth/",
-                "/api/verify/",
-                "/api/app-config",
-            ];
-            if public_no_auth.iter().any(|p| path.starts_with(p)) {
-                return next.run(request).await;
-            }
-            return Redirect::temporary("/welcome").into_response();
+    // No password configured: only the first-run onboarding surface should be
+    // publicly reachable. Other endpoints are behind the session cookie check
+    // further below, which will pass trivially when no password is set.
+    if active_pwd.as_deref().unwrap_or("").is_empty() {
+        let public_no_auth = [
+            "/",
+            "/login",
+            "/api/auth/login",
+            "/api/auth/logout",
+            "/api/verify/",
+            "/api/app-config",
+            "/api/app-config/save",
+            "/api/app-config/apply",
+            "/api/set-password",
+        ];
+        if public_no_auth
+            .iter()
+            .any(|p| &path == p || path.starts_with(&format!("{}/", p)) || path.starts_with(p))
+        {
+            return next.run(req).await;
         }
-        Some(ref active_pwd) => {
-            if path == "/welcome" {
-                return Redirect::temporary("/").into_response();
-            }
-
-            let public_api = ["/api/auth/login", "/api/auth/logout", "/api/verify/"];
-            if public_api.iter().any(|p| path.starts_with(p)) {
-                return next.run(request).await;
-            }
-
-            if path.starts_with("/api/") {
-                if path.starts_with("/api/upload") && request.headers().get("x-api-key").is_some() {
-                    return next.run(request).await;
-                }
-
-                let session = get_cookie_value(request.headers(), COOKIE_NAME);
-                let is_auth = check_session(session.as_deref(), active_pwd, &app_settings);
-
-                if !is_auth {
-                    tracing::warn!("API 未授权访问: {}", path);
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        axum::Json(serde_json::json!({
-                            "detail": error_payload("需要网页登录", "login_required", None)
-                        })),
-                    )
-                        .into_response();
-                }
-                return next.run(request).await;
-            }
-
-            let protected_pages = ["/", "/image_hosting", "/files", "/settings"];
-            let is_protected_page = protected_pages.iter().any(|p| path == *p);
-
-            let session = get_cookie_value(request.headers(), COOKIE_NAME);
-            let is_auth = check_session(session.as_deref(), active_pwd, &app_settings);
-
-            if is_protected_page {
-                if !is_auth {
-                    return Redirect::temporary("/login").into_response();
-                }
-                return next.run(request).await;
-            }
-
-            if path == "/login" || path == "/pwd" {
-                if is_auth {
-                    return Redirect::temporary("/").into_response();
-                }
-                return next.run(request).await;
-            }
-
-            if path.starts_with("/share/") {
-                return next.run(request).await;
-            }
-
-            next.run(request).await
-        }
+        return next.run(req).await;
     }
+
+    // Password configured: a narrow set of API routes is always public so that
+    // the login form and logout endpoint remain usable. `/api/verify/*` is no
+    // longer public once a password is set — it leaks bot/channel validity.
+    let public_api = ["/api/auth/login", "/api/auth/logout"];
+    if public_api.iter().any(|p| &path == p) {
+        return next.run(req).await;
+    }
+    // Login page itself must be reachable without auth so users can log in.
+    if &path == "/login" {
+        return next.run(req).await;
+    }
+
+    let headers = req.headers().clone();
+    let cookie = extract_cookie(&headers, COOKIE_NAME);
+
+    if check_session(cookie, active_pwd.as_deref(), session_token.as_deref()) {
+        return next.run(req).await;
+    }
+
+    redirect_or_401(&path, wants_html(&headers))
 }

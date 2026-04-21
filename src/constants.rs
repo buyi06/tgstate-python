@@ -28,14 +28,20 @@ pub const RATE_LIMIT_MAX_ENTRIES: usize = 10_000;
 /// SSE keepalive interval in seconds
 pub const SSE_KEEPALIVE_SECS: u64 = 15;
 
-/// Session cookie max-age in seconds (24 hours)
+/// Session cookie max-age in seconds (24 hours). May be overridden by env
+/// `SESSION_MAX_AGE_SECS` at runtime (see `auth::build_cookie`).
 pub const SESSION_MAX_AGE_SECS: u32 = 86400;
 
-/// Short ID length for file identifiers
-pub const SHORT_ID_LENGTH: usize = 6;
+/// Short ID length for file identifiers. Ten chars of 62-alphabet ≈ 60 bits of
+/// entropy, which is practical-only enumeration-resistant for a single-admin
+/// self-hosted tool.
+pub const SHORT_ID_LENGTH: usize = 10;
 
 /// Broadcast event bus capacity
 pub const EVENT_BUS_CAPACITY: usize = 200;
 
 /// Bot polling long-poll timeout in seconds
 pub const BOT_POLL_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum number of file IDs accepted in a single batch-delete request.
+pub const BATCH_DELETE_MAX: usize = 100;

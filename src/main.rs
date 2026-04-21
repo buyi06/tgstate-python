@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::Router;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
@@ -111,10 +112,15 @@ async fn main() {
     tracing::info!("服务器监听: {}", addr);
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(state.clone()))
-        .await
-        .expect("Server error");
+    // Provide ConnectInfo<SocketAddr> so middleware can see the real peer IP
+    // for rate-limiting (otherwise X-Forwarded-For spoofing is trivial).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(state.clone()))
+    .await
+    .expect("Server error");
 
     tracing::info!("应用关闭");
 }

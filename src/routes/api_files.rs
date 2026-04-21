@@ -66,10 +66,13 @@ fn guess_content_type(filename: &str) -> String {
 }
 
 fn content_disposition(filename: &str, force_download: bool) -> String {
+    // Allow-list of extensions that are safe to render inline on the
+    // download host. We deliberately EXCLUDE executable/active content such
+    // as `svg`, `html`, `htm`, `xml`, `js` and `css`, which browsers will
+    // execute scripts from. Those are served as attachments.
     let preview_extensions = [
-        "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "tiff", "mp4", "webm", "ogg",
-        "mp3", "wav", "flac", "pdf", "txt", "html", "htm", "css", "js", "json", "xml", "csv", "md",
-        "log",
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "mp4", "webm", "ogg", "mp3",
+        "wav", "flac", "pdf", "txt", "json", "csv", "md", "log",
     ];
 
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -88,9 +91,12 @@ fn content_disposition(filename: &str, force_download: bool) -> String {
 }
 
 fn chunk_download_failed_response(chunk_id: &str) -> Response {
+    // Log the chunk_id for operators; do NOT include it in the response body
+    // because it reveals internal manifest structure to clients.
+    tracing::error!("chunk download failed: {}", chunk_id);
     http_error(
         StatusCode::BAD_GATEWAY,
-        &format!("Chunk download failed: {}", chunk_id),
+        "文件下载失败",
         "chunk_download_failed",
     )
     .into_response()
@@ -150,12 +156,9 @@ async fn serve_file(
     let peek_bytes = match peek_resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            return http_error(
-                StatusCode::BAD_GATEWAY,
-                &format!("读取文件失败: {}", e),
-                "read_error",
-            )
-            .into_response();
+            tracing::error!("读取文件失败: {}", e);
+            return http_error(StatusCode::BAD_GATEWAY, "读取文件失败", "read_error")
+                .into_response();
         }
     };
 
@@ -165,9 +168,10 @@ async fn serve_file(
         let full_resp = match client.get(&download_url).send().await {
             Ok(r) => r,
             Err(e) => {
+                tracing::error!("下载清单失败: {}", e);
                 return http_error(
                     StatusCode::BAD_GATEWAY,
-                    &format!("下载清单失败: {}", e),
+                    "下载文件失败",
                     "download_error",
                 )
                 .into_response();
@@ -176,9 +180,10 @@ async fn serve_file(
         let manifest_bytes = match full_resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
+                tracing::error!("读取清单失败: {}", e);
                 return http_error(
                     StatusCode::BAD_GATEWAY,
-                    &format!("读取清单失败: {}", e),
+                    "读取文件失败",
                     "read_error",
                 )
                 .into_response();
@@ -572,6 +577,17 @@ async fn batch_delete_files(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<BatchDeleteRequest>,
 ) -> impl IntoResponse {
+    // Cap the number of IDs per request so callers cannot abuse batch delete
+    // to issue an unbounded sequence of Telegram API requests.
+    if payload.file_ids.len() > crate::constants::BATCH_DELETE_MAX {
+        return http_error(
+            StatusCode::BAD_REQUEST,
+            "批量删除数量超过上限",
+            "too_many_items",
+        )
+        .into_response();
+    }
+
     let tg_service = match get_telegram_service(&state) {
         Ok(s) => s,
         Err(e) => return e.into_response(),

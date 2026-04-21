@@ -116,7 +116,10 @@ async fn upload_file(
         .map(|s| s.to_string());
     let auth_optional = picgo_key.map_or(true, |k| k.is_empty())
         && pass_word_hash_ref.map_or(true, |p| p.is_empty());
-    let prechecked_auth = header_key.is_some() || has_referer;
+    // Only HEADER-based credentials are trustworthy for pre-checking auth.
+    // The Referer header is client-controlled and trivially spoofable, so it
+    // must not grant upload access (CVE-class auth bypass).
+    let prechecked_auth = header_key.is_some();
 
     if prechecked_auth {
         if let Err((_, msg, code)) = auth::ensure_upload_auth(
@@ -198,8 +201,10 @@ async fn upload_file(
         }
     }
 
-    // Final auth check with form key (for API-only requests without referer/header key)
-    if header_key.is_none() && !has_referer {
+    // Final auth check with form key. We always re-verify when the header
+    // key was absent, regardless of Referer, because Referer is spoofable
+    // and must never substitute for a real credential.
+    if header_key.is_none() {
         let final_key = form_key.as_deref();
         if let Err((_, msg, code)) = auth::ensure_upload_auth(
             has_referer,
@@ -218,7 +223,7 @@ async fn upload_file(
             tracing::error!("文件上传失败: {}", e);
             http_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("文件上传失败: {}", e),
+                "文件上传失败",
                 "upload_failed",
             )
         })?;

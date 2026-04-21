@@ -7,9 +7,10 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::auth::{self, sha256_hex};
+use crate::auth;
 use crate::config;
-use crate::state::AppState;
+use crate::database;
+use crate::state::{self, AppState};
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -34,9 +35,36 @@ async fn login(
     match active_password {
         Some(ref pwd) if auth::verify_password_auto(&input, pwd.trim()) => {
             tracing::info!("登录成功");
-            // Cookie value is sha256 of the plaintext input
-            let hash = sha256_hex(&input);
-            let cookie = auth::build_cookie(&hash, is_https(&headers));
+
+            // Generate a fresh random session token, persist it alongside existing
+            // settings so the middleware's server-side token check succeeds, then
+            // set the cookie. This replaces the old sha256(password) cookie.
+            let session_token = auth::generate_session_token();
+
+            let mut merged = database::get_app_settings_from_db(&state.db_pool)
+                .unwrap_or_default();
+            merged.insert(
+                "SESSION_TOKEN".to_string(),
+                Some(session_token.clone()),
+            );
+            if let Err(e) = database::save_app_settings_to_db(&state.db_pool, &merged) {
+                tracing::error!("保存会话令牌失败: {}", e);
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "message": "服务器错误"
+                    })),
+                )
+                    .into_response();
+            }
+
+            // Refresh in-memory app_settings snapshot (do NOT restart the bot).
+            if let Err(e) = state::apply_runtime_settings(state.clone(), false).await {
+                tracing::warn!("刷新运行时配置失败 (可忽略): {}", e);
+            }
+
+            let cookie = auth::build_cookie(&session_token, is_https(&headers));
             (
                 [(axum::http::header::SET_COOKIE, cookie)],
                 Json(serde_json::json!({

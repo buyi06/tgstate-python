@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::auth::sha256_hex;
+use crate::auth;
 use crate::config;
 use crate::database;
 use crate::error::http_error;
@@ -64,7 +65,10 @@ fn validate_config(cfg: &std::collections::HashMap<String, Option<String>>) -> R
 fn merge_config(
     existing: &std::collections::HashMap<String, Option<String>>,
     incoming: &AppConfigRequest,
-) -> std::collections::HashMap<String, Option<String>> {
+) -> Result<
+    std::collections::HashMap<String, Option<String>>,
+    (axum::http::StatusCode, &'static str, &'static str),
+> {
     let mut result = existing.clone();
 
     if let Some(ref v) = incoming.bot_token {
@@ -81,14 +85,24 @@ fn merge_config(
             result.insert("PASS_WORD".into(), None);
             result.insert("SESSION_TOKEN".into(), None);
         } else {
-            // Hash password and compute session token
-            if let Ok(hashed) = crate::auth::hash_password(&v) {
-                let session_token = sha256_hex(&v);
-                result.insert("PASS_WORD".into(), Some(hashed));
-                result.insert("SESSION_TOKEN".into(), Some(session_token));
-            } else {
-                // Fallback: store plaintext if hashing fails
-                result.insert("PASS_WORD".into(), Some(v));
+            // Hash password and compute a cryptographically random session token.
+            // The token is independent of the password, so sessions cannot be
+            // forged from knowledge of the plaintext or hash. If hashing fails we
+            // REJECT the update rather than falling back to plaintext storage.
+            match auth::hash_password(&v) {
+                Ok(hashed) => {
+                    let session_token = auth::generate_session_token();
+                    result.insert("PASS_WORD".into(), Some(hashed));
+                    result.insert("SESSION_TOKEN".into(), Some(session_token));
+                }
+                Err(e) => {
+                    tracing::error!("密码哈希失败: {}", e);
+                    return Err((
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "密码哈希失败",
+                        "hash_error",
+                    ));
+                }
             }
         }
     }
@@ -100,7 +114,14 @@ fn merge_config(
         let v = v.trim().to_string();
         result.insert("PICGO_API_KEY".into(), if v.is_empty() { None } else { Some(v) });
     }
-    result
+    Ok(result)
+}
+
+fn is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v == "https")
 }
 
 async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -129,16 +150,18 @@ async fn save_config_only(
     Json(payload): Json<AppConfigRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
     let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
-    let merged = merge_config(&existing, &payload);
+    let merged = merge_config(&existing, &payload)
+        .map_err(|(status, msg, code)| http_error(status, msg, code))?;
 
     if let Err((status, msg, code)) = validate_config(&merged) {
         return Err(http_error(status, msg, code));
     }
 
     database::save_app_settings_to_db(&state.db_pool, &merged).map_err(|e| {
+        tracing::error!("保存配置失败: {}", e);
         http_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("保存失败: {}", e),
+            "保存配置失败",
             "save_error",
         )
     })?;
@@ -152,19 +175,22 @@ async fn save_config_only(
 
 async fn save_and_apply(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<AppConfigRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
     let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
-    let merged = merge_config(&existing, &payload);
+    let merged = merge_config(&existing, &payload)
+        .map_err(|(status, msg, code)| http_error(status, msg, code))?;
 
     if let Err((status, msg, code)) = validate_config(&merged) {
         return Err(http_error(status, msg, code));
     }
 
     database::save_app_settings_to_db(&state.db_pool, &merged).map_err(|e| {
+        tracing::error!("保存配置失败: {}", e);
         http_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("保存失败: {}", e),
+            "保存配置失败",
             "save_error",
         )
     })?;
@@ -173,17 +199,24 @@ async fn save_and_apply(
 
     let bot = state.bot_state.lock().await;
 
-    // Handle password cookie - use session_token if available
-    let session_token = merged.get("SESSION_TOKEN").and_then(|v| v.as_deref()).unwrap_or("");
-    let pwd = merged.get("PASS_WORD").and_then(|v| v.as_deref()).unwrap_or("");
+    // Handle password cookie using the server-side random session token.
+    // We honor x-forwarded-proto so cookies get the Secure flag when a
+    // trusted reverse proxy terminates TLS; the COOKIE_SECURE env var
+    // (handled inside build_cookie) can force Secure regardless.
+    let session_token = merged
+        .get("SESSION_TOKEN")
+        .and_then(|v| v.as_deref())
+        .unwrap_or("");
+    let pwd = merged
+        .get("PASS_WORD")
+        .and_then(|v| v.as_deref())
+        .unwrap_or("");
+    let secure = is_https(&headers);
     let cookie = if !pwd.is_empty() && !session_token.is_empty() {
-        crate::auth::build_cookie(session_token, false)
-    } else if !pwd.is_empty() {
-        // Legacy plaintext password path
-        let hash = sha256_hex(pwd);
-        crate::auth::build_cookie(&hash, false)
+        auth::build_cookie(session_token, secure)
     } else {
-        crate::auth::build_clear_cookie()
+        // No password set OR no session token — clear any stale cookie.
+        auth::build_clear_cookie()
     };
 
     Ok((
@@ -223,14 +256,16 @@ async fn set_password(
     let password = payload.password.trim().to_string();
 
     // Hash the password with argon2 and compute session token
-    let hashed = crate::auth::hash_password(&password).map_err(|e| {
+    let hashed = auth::hash_password(&password).map_err(|e| {
+        tracing::error!("密码哈希失败: {}", e);
         crate::error::AppError::new(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("密码哈希失败: {}", e),
+            "密码哈希失败",
             "hash_error",
         )
     })?;
-    let session_token = sha256_hex(&password);
+    // Random session token, independent of the password.
+    let session_token = auth::generate_session_token();
 
     let mut current = database::get_app_settings_from_db(db_pool).unwrap_or_default();
     current.insert("PASS_WORD".into(), Some(hashed));
@@ -300,19 +335,25 @@ async fn verify_bot(
                     }))
                 }
             }
-            Err(e) => Json(serde_json::json!({
+            Err(e) => {
+                tracing::warn!("verify_bot parse error: {}", e);
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "ok": false,
+                    "available": false,
+                    "message": "解析响应失败"
+                }))
+            }
+        },
+        Err(e) => {
+            tracing::warn!("verify_bot connect error: {}", e);
+            Json(serde_json::json!({
                 "status": "ok",
                 "ok": false,
                 "available": false,
-                "message": format!("解析响应失败: {}", e)
-            })),
+                "message": "连接失败"
+            }))
         },
-        Err(e) => Json(serde_json::json!({
-            "status": "ok",
-            "ok": false,
-            "available": false,
-            "message": format!("连接失败: {}", e)
-        })),
     }
 }
 
@@ -381,17 +422,23 @@ async fn verify_channel(
                     }))
                 }
             }
-            Err(e) => Json(serde_json::json!({
+            Err(e) => {
+                tracing::warn!("verify_channel parse error: {}", e);
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "available": false,
+                    "message": "解析响应失败"
+                }))
+            }
+        },
+        Err(e) => {
+            tracing::warn!("verify_channel connect error: {}", e);
+            Json(serde_json::json!({
                 "status": "ok",
                 "available": false,
-                "message": format!("解析响应失败: {}", e)
-            })),
+                "message": "连接失败"
+            }))
         },
-        Err(e) => Json(serde_json::json!({
-            "status": "ok",
-            "available": false,
-            "message": format!("连接失败: {}", e)
-        })),
     }
 }
 

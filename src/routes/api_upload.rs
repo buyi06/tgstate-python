@@ -121,17 +121,32 @@ async fn upload_file(
     // are the only credentials that exist before we consume the multipart
     // body. Referer is client-controlled and auth.rs ignores it.
     //
-    // If this pre-check succeeds, the request is authenticated regardless of
-    // whether a form-level `key` field is sent — this is what lets the browser
-    // upload form (cookie only, no form `key`) reach the `file` field.
-    let prechecked_auth = auth::ensure_upload_auth(
-        has_referer,
-        cookie_value.as_deref(),
-        picgo_key,
-        pass_word_hash_ref,
-        header_key.as_deref(),
-    )
-    .is_ok();
+    // The browser session cookie is the random SESSION_TOKEN from
+    // app_settings, NOT the password. We verify it directly against the
+    // stored token so a logged-in browser can upload without submitting a
+    // form `key` field. `auth_middleware` uses the same comparison.
+    let session_token_owned = app_settings
+        .get("SESSION_TOKEN")
+        .and_then(|v| v.clone());
+    let cookie_valid = match (cookie_value.as_deref(), session_token_owned.as_deref()) {
+        (Some(c), Some(t)) if !c.is_empty() && !t.is_empty() => {
+            auth::secure_compare(c, t)
+        }
+        _ => false,
+    };
+    // ensure_upload_auth handles the x-api-key / PicGo path. We pass None
+    // for the cookie because cookie validity is handled via `cookie_valid`
+    // above — that function still compares cookie to the password hash,
+    // which does not match the random session token used in v2.x.
+    let prechecked_auth = cookie_valid
+        || auth::ensure_upload_auth(
+            has_referer,
+            None,
+            picgo_key,
+            pass_word_hash_ref,
+            header_key.as_deref(),
+        )
+        .is_ok();
 
     // Parse multipart body - stream file chunks to Telegram
     let mut form_key: Option<String> = None;
@@ -153,7 +168,7 @@ async fn upload_file(
             if !auth_progress.auth_verified {
                 if let Err((_, msg, code)) = auth::ensure_upload_auth(
                     has_referer,
-                    cookie_value.as_deref(),
+                    None,
                     picgo_key,
                     pass_word_hash_ref,
                     key_text.as_deref(),
@@ -209,7 +224,7 @@ async fn upload_file(
         let final_key = form_key.as_deref();
         if let Err((_, msg, code)) = auth::ensure_upload_auth(
             has_referer,
-            cookie_value.as_deref(),
+            None,
             picgo_key,
             pass_word_hash_ref,
             final_key,

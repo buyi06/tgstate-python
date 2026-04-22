@@ -16,6 +16,10 @@ pub const RATE_LIMIT_LOGIN_MAX: u32 = 5;
 pub const RATE_LIMIT_UPLOAD_MAX: u32 = 10;
 /// Rate limit: general API requests per window
 pub const RATE_LIMIT_API_MAX: u32 = 120;
+/// Rate limit: public download/share requests per window. Covers `/d/*` and
+/// `/share/*`. Higher than API because legitimate browsers issue many of
+/// these per page load (HTML + thumbnails + Range requests for video).
+pub const RATE_LIMIT_DOWNLOAD_MAX: u32 = 300;
 /// Rate limit: window duration in seconds
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
@@ -28,11 +32,13 @@ pub const RATE_LIMIT_MAX_ENTRIES: usize = 10_000;
 /// SSE keepalive interval in seconds
 pub const SSE_KEEPALIVE_SECS: u64 = 15;
 
-/// Session cookie max-age in seconds (30 days). Combined with the sliding
+/// Session cookie max-age in seconds (7 days). Combined with the sliding
 /// refresh in `middleware::auth`, a user who visits the site at least once
-/// every 30 days stays logged in indefinitely. May be overridden by env
-/// `SESSION_MAX_AGE_SECS` at runtime (see `auth::build_cookie`).
-pub const SESSION_MAX_AGE_SECS: u32 = 30 * 24 * 60 * 60;
+/// a week stays logged in indefinitely; otherwise the cookie expires and
+/// the user must log in again. May be overridden by env `SESSION_MAX_AGE_SECS`
+/// at runtime (see `auth::build_cookie`). The previous 30-day default was
+/// longer than SECURITY.md advertised and is shortened here.
+pub const SESSION_MAX_AGE_SECS: u32 = 7 * 24 * 60 * 60;
 
 /// Short ID length for file identifiers. Ten chars of 62-alphabet ≈ 60 bits of
 /// entropy, which is practical-only enumeration-resistant for a single-admin

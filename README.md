@@ -88,6 +88,13 @@ cargo build --release
 | `BASE_URL` | 公开访问 URL | `http://127.0.0.1:8000` |
 | `DATA_DIR` | 数据目录 | `app/data` |
 | `LOG_LEVEL` | 日志级别 | `info` |
+| `SESSION_MAX_AGE_SECS` | 登录会话 Cookie 有效期（秒） | `604800` (7天) |
+| `COOKIE_SECURE` | 强制使用 `Secure` Cookie（反向代理 TLS 场景） | 自动推断 |
+| `TRUST_FORWARDED_FOR` | 信任 `X-Forwarded-For` / `X-Real-IP` 识别客户端 IP | `0` |
+
+> ⚠️ **如果你使用反向代理**，必须同时设置 `COOKIE_SECURE=1` 和 `TRUST_FORWARDED_FOR=1`，
+> 否则 Cookie 可能缺失 `Secure` 标志，限流也会对所有请求在代理层合并后统一限流。请确保
+> `TRUST_FORWARDED_FOR` 只在前置代理可信的网络拓扑下开启。
 
 ## API
 

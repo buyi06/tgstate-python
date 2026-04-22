@@ -12,12 +12,15 @@ pub async fn run_bot_polling(
     db_pool: DbPool,
     event_bus: BroadcastEventBus,
     base_url: String,
+    http_client: reqwest::Client,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .unwrap();
+    // Reuse the shared `AppState::http_client` instead of constructing a new
+    // one on every bot restart. Apart from avoiding per-restart connection
+    // pool churn, this also ensures Telegram requests issued from the bot
+    // polling loop honour the same timeouts / TLS config as every other
+    // Telegram call in the process.
+    let client = http_client;
 
     let tg_service = TelegramService::new(
         bot_token.clone(),
@@ -182,8 +185,13 @@ async fn handle_new_file(
         return;
     };
 
-    // Skip large files and manifests
-    if file_size >= 20 * 1024 * 1024 || file_name.ends_with(".manifest") {
+    // Skip large files and manifests. Anything larger than the per-chunk
+    // Telegram limit (`TELEGRAM_CHUNK_SIZE`) has to have been uploaded via
+    // the multi-part / manifest flow, which the bot-side ingestion path
+    // does not know how to reconstruct.
+    if file_size as usize >= constants::TELEGRAM_CHUNK_SIZE
+        || file_name.ends_with(".manifest")
+    {
         return;
     }
 

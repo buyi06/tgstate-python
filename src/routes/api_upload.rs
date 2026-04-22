@@ -59,13 +59,22 @@ fn sanitize_filename(raw: &str) -> String {
         .chars()
         .filter(|c| !c.is_control() && *c != '\0')
         .collect();
-    if clean.len() > 255 {
-        clean[..255].to_string()
-    } else if clean.is_empty() {
-        "upload".to_string()
-    } else {
-        clean
+    if clean.is_empty() {
+        return "upload".to_string();
     }
+    // UTF-8-safe byte-length cap: `clean[..255]` would panic if byte 255
+    // falls inside a multibyte character (e.g. a Chinese filename).
+    if clean.len() <= 255 {
+        return clean;
+    }
+    let mut cutoff = 0;
+    for (idx, _) in clean.char_indices() {
+        if idx > 255 {
+            break;
+        }
+        cutoff = idx;
+    }
+    clean[..cutoff].to_string()
 }
 
 async fn upload_file(
@@ -107,8 +116,16 @@ async fn upload_file(
 
     let picgo_key = app_settings.get("PICGO_API_KEY").and_then(|v| v.as_deref());
     let pass_word = app_settings.get("PASS_WORD").and_then(|v| v.as_deref());
-    let pass_word_hash = pass_word.map(|p| auth::sha256_hex(p));
-    let pass_word_hash_ref = pass_word_hash.as_deref();
+    // Upload auth used to derive a sha256 of the password and feed that as
+    // the expected cookie value. That comparison was always a no-op because
+    // session cookies are random tokens (see `auth::generate_session_token`)
+    // that are independent of the password hash. The auth middleware already
+    // validates the session cookie against the stored SESSION_TOKEN before
+    // the request ever reaches this handler, so we just forward the raw
+    // password presence to `ensure_upload_auth` for the referer / picgo-key
+    // branches. The cookie branch inside `ensure_upload_auth` is reachable
+    // only for header-level requests the middleware already allowed.
+    let pass_word_hash_ref = pass_word;
 
     let header_key = headers
         .get("x-api-key")

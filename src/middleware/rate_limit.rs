@@ -23,6 +23,10 @@ pub struct RateLimiter {
     login: Arc<Mutex<HashMap<IpAddr, RateEntry>>>,
     upload: Arc<Mutex<HashMap<IpAddr, RateEntry>>>,
     api: Arc<Mutex<HashMap<IpAddr, RateEntry>>>,
+    /// Public-facing download / share bucket. These routes are always public
+    /// (no login required), so they need their own per-IP cap to prevent a
+    /// single client from hammering Telegram via `/d/*` or `/share/*`.
+    download: Arc<Mutex<HashMap<IpAddr, RateEntry>>>,
 }
 
 impl RateLimiter {
@@ -31,6 +35,7 @@ impl RateLimiter {
             login: Arc::new(Mutex::new(HashMap::new())),
             upload: Arc::new(Mutex::new(HashMap::new())),
             api: Arc::new(Mutex::new(HashMap::new())),
+            download: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -127,6 +132,8 @@ pub async fn rate_limit_middleware(
         check_rate(&limiter.upload, ip, constants::RATE_LIMIT_UPLOAD_MAX, Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS)).await
     } else if path.starts_with("/api/") {
         check_rate(&limiter.api, ip, constants::RATE_LIMIT_API_MAX, Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS)).await
+    } else if path.starts_with("/d/") || path.starts_with("/share/") {
+        check_rate(&limiter.download, ip, constants::RATE_LIMIT_DOWNLOAD_MAX, Duration::from_secs(constants::RATE_LIMIT_WINDOW_SECS)).await
     } else {
         true
     };
@@ -152,7 +159,7 @@ pub async fn cleanup_expired(limiter: &RateLimiter) {
     let window = Duration::from_secs(constants::RATE_LIMIT_CLEANUP_INTERVAL_SECS);
     let now = Instant::now();
 
-    for store in [&limiter.login, &limiter.upload, &limiter.api] {
+    for store in [&limiter.login, &limiter.upload, &limiter.api, &limiter.download] {
         let mut map = store.lock().await;
         map.retain(|_, entry| now.duration_since(entry.window_start) < window);
     }

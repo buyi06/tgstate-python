@@ -155,7 +155,11 @@ pub async fn auth_middleware(
         {
             return next.run(req).await;
         }
-        return next.run(req).await;
+        // First-run mode: password has not been set yet. Only the onboarding
+        // surface above is reachable. Deny everything else so an attacker
+        // cannot upload/delete/list before the owner finishes setup.
+        let headers = req.headers().clone();
+        return redirect_or_401(&path, wants_html(&headers));
     }
 
     // Password configured: a narrow set of API routes is always public so that

@@ -81,6 +81,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), String> {
 
     let token_clone = token.clone();
     let channel_clone = channel.clone();
+    let http_client = state.http_client.clone();
     tokio::spawn(async move {
         bot_polling::run_bot_polling(
             token_clone,
@@ -88,6 +89,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), String> {
             db_pool,
             event_bus,
             base_url,
+            http_client,
             shutdown_rx,
         )
         .await;
@@ -117,7 +119,20 @@ pub async fn apply_runtime_settings(
     let current = config::get_app_settings(&state.settings, &state.db_pool);
     let bot_ready = config::is_bot_ready(&current);
 
-    // Stop existing bot
+    // Soft refresh path: the caller only wants to pick up updated
+    // `app_settings` (e.g. after `/api/auth/login` rotates SESSION_TOKEN).
+    // Previously this code stopped the running bot even for soft refreshes,
+    // which meant logging in as the admin would silently kill the Telegram
+    // bot. Now we only update the in-memory snapshot and leave the bot alone.
+    if !start_bot_flag {
+        let mut bot = state.bot_state.lock().await;
+        bot.app_settings = current;
+        bot.bot_ready = bot_ready;
+        // Do not clobber an existing bot_error on a soft refresh.
+        return Ok(());
+    }
+
+    // Hard apply path: stop the bot, swap config, and restart if ready.
     stop_bot(&state).await;
 
     {
@@ -125,10 +140,6 @@ pub async fn apply_runtime_settings(
         bot.app_settings = current;
         bot.bot_ready = bot_ready;
         bot.bot_error = None;
-    }
-
-    if !start_bot_flag {
-        return Ok(());
     }
 
     if bot_ready {

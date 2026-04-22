@@ -26,8 +26,11 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
             .parse()
             .unwrap(),
     );
-    // XSS filter for older browsers
-    headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
+    // Explicitly disable the legacy XSS auditor. Modern OWASP guidance is to
+    // send `0` here; the legacy filter in old IE/Chromium can actually be
+    // abused to introduce XSS, and modern browsers ignore it entirely. Rely
+    // on the strict Content-Security-Policy below instead.
+    headers.insert("X-XSS-Protection", "0".parse().unwrap());
     // Block cross-domain policies (Flash/PDF)
     headers.insert("X-Permitted-Cross-Domain-Policies", "none".parse().unwrap());
     // Content Security Policy

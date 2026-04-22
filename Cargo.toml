@@ -31,7 +31,11 @@ serde_json = "1"
 dotenvy = "0.15"
 
 # Crypto
-sha2 = "0.10"
+# `hex` is still used by `auth::generate_session_token` to encode the
+# 32 random bytes as a 64-char hex session ID. `sha2` was previously used
+# to derive a sha256(password) cookie; that scheme has been removed in
+# favour of a random session token stored in SQLite, so `sha2` is no
+# longer a direct dependency.
 hex = "0.4"
 argon2 = "0.5"
 

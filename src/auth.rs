@@ -3,15 +3,8 @@ pub const COOKIE_NAME: &str = "tgstate_session";
 use std::sync::OnceLock;
 
 use rand::RngCore;
-use sha2::{Digest, Sha256};
 
 use crate::constants;
-
-pub fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
-}
 
 /// Generate a cryptographically random session token (32 bytes, hex-encoded -> 64 chars).
 ///

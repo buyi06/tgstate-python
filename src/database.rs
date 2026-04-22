@@ -137,7 +137,15 @@ pub fn add_file_metadata(
             params![filename, file_id, filesize, short_id],
         ) {
             Ok(_) => {
-                tracing::info!("已添加文件元数据: {}, short_id: {}", filename, short_id);
+                // Only log a short_id prefix. `/d/<short_id>` is a public,
+                // unauthenticated download endpoint; the short_id is therefore
+                // a bearer capability and must not be logged in full.
+                let short_id_preview = short_id.chars().take(2).collect::<String>();
+                tracing::info!(
+                    "已添加文件元数据: {}, short_id: {}***",
+                    filename,
+                    short_id_preview
+                );
                 return Ok(short_id);
             }
             Err(rusqlite::Error::SqliteFailure(err, _))

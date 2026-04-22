@@ -43,3 +43,34 @@ Out of scope:
   `X-Forwarded-For` / `X-Real-IP`. Otherwise rate limiting can be bypassed.
 - Back up `data.db` regularly; it contains the hashed password and session
   token.
+
+## Public endpoints (by design)
+
+The following endpoints do **not** require authentication and are intended to
+be reachable by anonymous clients. This is the product's sharing model; do
+not file issues against it.
+
+- `GET /d/:short_id` — streams a shared file by its short identifier.
+- `GET /share/:short_id` — renders an HTML preview page for the same file.
+- `GET /api/health` — used by Docker / load balancers.
+- `GET /`, `GET /login`, and `POST /api/auth/login` on first boot (when no
+  password has been set).
+
+`short_id` values behave like bearer tokens. They are generated with
+cryptographically-random input and only the prefix is ever logged, but if you
+need stricter access control you must deploy the service behind an
+authenticating reverse proxy. If a short link leaks, delete the underlying
+file — there is no way to rotate `short_id` while keeping the stored data.
+
+## Rate limiting
+
+Rate limits are keyed per client IP address and per bucket:
+
+- `login` — guards `/api/auth/login`.
+- `upload` — guards `/api/upload`.
+- `api` — guards the remaining `/api/*` surface.
+- `download` — guards the anonymous `/d/*` and `/share/*` surface.
+
+Behind a reverse proxy you must set `TRUST_FORWARDED_FOR=1` for the limiter
+to see real client IPs; otherwise every request appears to come from the
+proxy and a single misbehaving client can exhaust the bucket for everyone.

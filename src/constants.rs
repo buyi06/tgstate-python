@@ -28,9 +28,11 @@ pub const RATE_LIMIT_MAX_ENTRIES: usize = 10_000;
 /// SSE keepalive interval in seconds
 pub const SSE_KEEPALIVE_SECS: u64 = 15;
 
-/// Session cookie max-age in seconds (24 hours). May be overridden by env
+/// Session cookie max-age in seconds (30 days). Combined with the sliding
+/// refresh in `middleware::auth`, a user who visits the site at least once
+/// every 30 days stays logged in indefinitely. May be overridden by env
 /// `SESSION_MAX_AGE_SECS` at runtime (see `auth::build_cookie`).
-pub const SESSION_MAX_AGE_SECS: u32 = 86400;
+pub const SESSION_MAX_AGE_SECS: u32 = 30 * 24 * 60 * 60;
 
 /// Short ID length for file identifiers. Ten chars of 62-alphabet ≈ 60 bits of
 /// entropy, which is practical-only enumeration-resistant for a single-admin

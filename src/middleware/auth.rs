@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -58,6 +58,13 @@ fn wants_html(headers: &axum::http::HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.contains("text/html"))
         .unwrap_or(false)
+}
+
+fn is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v == "https")
 }
 
 fn load_settings_snapshot(
@@ -167,7 +174,24 @@ pub async fn auth_middleware(
     let cookie = extract_cookie(&headers, COOKIE_NAME);
 
     if check_session(cookie, active_pwd.as_deref(), session_token.as_deref()) {
-        return next.run(req).await;
+        // Sliding expiration: re-issue the cookie with a fresh Max-Age on every
+        // authenticated request, so active users stay logged in indefinitely.
+        // We only refresh on non-API HTML page loads and safe (GET/HEAD) API
+        // calls to avoid mutating Set-Cookie on every XHR response, which
+        // would be wasteful; GETs are frequent enough in normal use to keep
+        // the cookie fresh.
+        let secure = is_https(&headers);
+        let token = session_token.as_deref().unwrap_or("").to_string();
+        let mut resp = next.run(req).await;
+        if !token.is_empty() {
+            if let Ok(cookie_val) =
+                HeaderValue::from_str(&auth::build_cookie(&token, secure))
+            {
+                resp.headers_mut()
+                    .append(axum::http::header::SET_COOKIE, cookie_val);
+            }
+        }
+        return resp;
     }
 
     redirect_or_401(&path, wants_html(&headers))

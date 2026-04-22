@@ -116,22 +116,22 @@ async fn upload_file(
         .map(|s| s.to_string());
     let auth_optional = picgo_key.map_or(true, |k| k.is_empty())
         && pass_word_hash_ref.map_or(true, |p| p.is_empty());
-    // Only HEADER-based credentials are trustworthy for pre-checking auth.
-    // The Referer header is client-controlled and trivially spoofable, so it
-    // must not grant upload access (CVE-class auth bypass).
-    let prechecked_auth = header_key.is_some();
-
-    if prechecked_auth {
-        if let Err((_, msg, code)) = auth::ensure_upload_auth(
-            has_referer,
-            cookie_value.as_deref(),
-            picgo_key,
-            pass_word_hash_ref,
-            header_key.as_deref(),
-        ) {
-            return Err(http_error(axum::http::StatusCode::UNAUTHORIZED, msg, code));
-        }
-    }
+    // Pre-check auth using only HEADER-available credentials: the session
+    // cookie (browser login) and/or x-api-key (PicGo / API clients). These
+    // are the only credentials that exist before we consume the multipart
+    // body. Referer is client-controlled and auth.rs ignores it.
+    //
+    // If this pre-check succeeds, the request is authenticated regardless of
+    // whether a form-level `key` field is sent — this is what lets the browser
+    // upload form (cookie only, no form `key`) reach the `file` field.
+    let prechecked_auth = auth::ensure_upload_auth(
+        has_referer,
+        cookie_value.as_deref(),
+        picgo_key,
+        pass_word_hash_ref,
+        header_key.as_deref(),
+    )
+    .is_ok();
 
     // Parse multipart body - stream file chunks to Telegram
     let mut form_key: Option<String> = None;
@@ -201,10 +201,11 @@ async fn upload_file(
         }
     }
 
-    // Final auth check with form key. We always re-verify when the header
-    // key was absent, regardless of Referer, because Referer is spoofable
-    // and must never substitute for a real credential.
-    if header_key.is_none() {
+    // Final auth check with form-level `key`. Only needed when header-level
+    // credentials (cookie / x-api-key) did not already satisfy auth — e.g.
+    // PicGo clients that authenticate by submitting PICGO_API_KEY in the
+    // multipart body instead of as a header.
+    if !prechecked_auth {
         let final_key = form_key.as_deref();
         if let Err((_, msg, code)) = auth::ensure_upload_auth(
             has_referer,

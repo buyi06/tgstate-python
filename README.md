@@ -19,11 +19,11 @@
 
 ### 方式一：直接下载（推荐）
 
-从 [Releases](https://github.com/buyi06/tgstate-python/releases) 下载预编译的二进制文件：
+从 [Releases](https://github.com/buyi06/tgstate-rust/releases) 下载预编译的二进制文件：
 
 ```bash
 # 下载最新版
-wget https://github.com/buyi06/tgstate-python/releases/latest/download/tgstate-linux-amd64.tar.gz
+wget https://github.com/buyi06/tgstate-rust/releases/latest/download/tgstate-linux-amd64.tar.gz
 
 # 解压
 tar xzf tgstate-linux-amd64.tar.gz
